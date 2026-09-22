@@ -54,13 +54,16 @@ docker build -f docker/Dockerfile -t exl3xpu .
 hf download turboderp/Qwen3.8-27B-exl3 --revision 4.00bpw --local-dir $MODELS/turboderp-Qwen3.8-27B-exl3-4.00bpw
 
 # one replica on GPU 0 (port 8100)
-docker run --rm --device /dev/dri --group-add render --shm-size 32g --network host \
-  -v $MODELS:/models exl3xpu models/qwen3.8-27b-exl3-4.00bpw --gpu 0 \
+docker run --rm --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path:ro --group-add render \
+  --shm-size 32g --network host -v $MODELS:/models exl3xpu models/qwen3.8-27b-exl3-4.00bpw --gpu 0 \
   --model-path /models/turboderp-Qwen3.8-27B-exl3-4.00bpw
 
 # both GPUs, one replica each, least-outstanding proxy on :8000
 docker run ... exl3xpu models/qwen3.8-27b-exl3-4.00bpw --dp --model-path /models/turboderp-Qwen3.8-27B-exl3-4.00bpw
 ```
+
+`/dev/dri/by-path` must be mounted: oneCCL enumerates devices through it and the engine fails to start
+without it.
 
 Without Docker (inside any vLLM XPU environment with oneAPI 2025.3): `scripts/build_ext.sh && pip install -e .`,
 then `python3 scripts/serve.py models/qwen3.8-27b-exl3-4.00bpw --gpu 0`. Add `--print` to see the exact

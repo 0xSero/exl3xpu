@@ -101,15 +101,18 @@ def main():
         return
     procs.append(subprocess.Popen(lb, stdout=open(os.path.join(args.log_dir, "lb.log"), "w"), stderr=subprocess.STDOUT))
 
-    def stop(*_):
+    def stop(*_, code=0):
         for p in procs:
-            p.send_signal(signal.SIGTERM)
-        sys.exit(0)
+            if p.poll() is None:
+                p.send_signal(signal.SIGTERM)
+        sys.exit(code)
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     while all(p.poll() is None for p in procs):
         time.sleep(2)
-    stop()
+    dead = [i for i, p in enumerate(procs) if p.poll() is not None]
+    print(f"serve.py: process(es) {dead} exited; see {args.log_dir}", file=sys.stderr)
+    stop(code=1)
 
 
 if __name__ == "__main__":

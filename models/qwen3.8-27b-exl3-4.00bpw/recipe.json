@@ -22,7 +22,8 @@
  "launch": {
   "config": "models/qwen3.8-27b-exl3-4.00bpw/model.yaml",
   "command": "python3 scripts/serve.py models/qwen3.8-27b-exl3-4.00bpw --gpu 0",
-  "docker": "docker run --device /dev/dri --group-add render --shm-size 32g --network host -v $MODELS:/models -e MODELS_DIR=/models exl3xpu:latest"
+  "docker": "docker run --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path:ro --group-add render --shm-size 32g --network host -v $MODELS:/models exl3xpu:0.1.0 models/qwen3.8-27b-exl3-4.00bpw --gpu 0 --model-path /models/turboderp-Qwen3.8-27B-exl3-4.00bpw",
+  "docker_dp": "docker run --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path:ro --group-add render --shm-size 32g --network host -v $MODELS:/models exl3xpu:0.1.0 models/qwen3.8-27b-exl3-4.00bpw --dp --model-path /models/turboderp-Qwen3.8-27B-exl3-4.00bpw"
  },
  "capabilities": {
   "chat": true,
