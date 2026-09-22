@@ -134,6 +134,57 @@ void exl3_gemm_small(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Tenso
     else TORCH_CHECK(false, "out dtype");
 }
 
+
+template <int K, int CB>
+static void launch_reconstruct(const at::Tensor& tr, at::Tensor& w, int n0, sycl::queue& q) {
+    int tk = tr.size(0), tiles_n = tr.size(1), n_out = w.size(1);
+    constexpr int NT = 8;   // 128 columns per thread (reconstruct slices are multiples of 128)
+    int n_strips = n_out / (16 * NT);
+    ReconstructKernel<K, CB, NT> k{reinterpret_cast<const uint32_t*>(tr.data_ptr()),
+                                   reinterpret_cast<fp16*>(w.data_ptr()), tiles_n, n0 / 16, n_out, n_strips, tk};
+    int n = n_strips * tk, local = 8;
+    q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
+}
+
+void exl3_reconstruct(at::Tensor trellis, at::Tensor w, int64_t n0, int64_t K, int64_t cb) {
+    TORCH_CHECK(w.scalar_type() == at::kHalf && w.is_contiguous() && w.size(1) % 128 == 0 && n0 % 128 == 0);
+    TORCH_CHECK(w.size(0) == trellis.size(0) * 16 && n0 + w.size(1) <= trellis.size(1) * 16);
+    auto& q = queue_of(w);
+    bool ok = true;
+    if (K == 4 && cb == 2) launch_reconstruct<4, 2>(trellis, w, n0, q);
+    else if (K == 6 && cb == 2) launch_reconstruct<6, 2>(trellis, w, n0, q);
+#ifdef EXL3_ALL_CODEBOOKS
+    else if (K == 2 && cb == 2) launch_reconstruct<2, 2>(trellis, w, n0, q);
+    else if (K == 3 && cb == 2) launch_reconstruct<3, 2>(trellis, w, n0, q);
+    else if (K == 5 && cb == 2) launch_reconstruct<5, 2>(trellis, w, n0, q);
+    else if (K == 4 && cb == 1) launch_reconstruct<4, 1>(trellis, w, n0, q);
+    else if (K == 4 && cb == 0) launch_reconstruct<4, 0>(trellis, w, n0, q);
+#endif
+    else ok = false;
+    TORCH_CHECK(ok, "exl3_reconstruct: unsupported K/cb");
+}
+
+// Debug/verification: part = xh_blocked @ W_inner via a forced path (0 = vector, 1 = DPAS), summed over splits.
+at::Tensor exl3_gemm_raw(at::Tensor xh_blocked, at::Tensor trellis, at::Tensor shard_of_nb, int64_t N, int64_t K,
+                         int64_t cb, int64_t path) {
+    auto& q = queue_of(xh_blocked);
+    int S = xh_blocked.size(0), Kdim = xh_blocked.size(1) * 16, M = xh_blocked.size(2);
+    bool use_vec = path == 0;
+    int MR = M <= 1 ? 1 : (M <= 2 ? 2 : (M <= 4 ? 4 : 8));
+    int MB = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 32 ? 32 : 64));
+    int tk = Kdim / 16;
+    int P = 4, rps = (tk + P - 1) / P; P = (tk + rps - 1) / rps;
+    auto part = at::zeros({P, M, N}, xh_blocked.options().dtype(at::kFloat));
+    bool ok = false;
+    if (K == 4 && cb == 2) ok = use_vec ? dispatch_mr<4, 2>(MR, xh_blocked, trellis, shard_of_nb, part, M, Kdim, N, P, rps, q)
+                                        : dispatch_dpas<4, 2>(MB, xh_blocked, trellis, shard_of_nb, part, M, Kdim, N, P, rps, q);
+    if (K == 6 && cb == 2) ok = use_vec ? dispatch_mr<6, 2>(MR, xh_blocked, trellis, shard_of_nb, part, M, Kdim, N, P, rps, q)
+                                        : dispatch_dpas<6, 2>(MB, xh_blocked, trellis, shard_of_nb, part, M, Kdim, N, P, rps, q);
+    TORCH_CHECK(ok);
+    (void)S;
+    return part.sum(0);
+}
+
 bool exl3_supported(int64_t K, int64_t cb) {
     if (cb == 2 && (K == 4 || K == 6)) return true;
 #ifdef EXL3_ALL_CODEBOOKS
@@ -150,6 +201,10 @@ TORCH_LIBRARY(exl3xpu_C, m) {
     m.def("exl3_gemm_small(Tensor x, Tensor trellis, Tensor suh, Tensor svh, Tensor shard_of_nb, Tensor(a!) out, int K, int cb) -> ()");
     m.impl("exl3_gemm_small", torch::kXPU, &exl3_gemm_small);
     m.def("exl3_supported(int K, int cb) -> bool", &exl3_supported);
+    m.def("exl3_reconstruct(Tensor trellis, Tensor(a!) w, int n0, int K, int cb) -> ()");
+    m.impl("exl3_reconstruct", torch::kXPU, &exl3_reconstruct);
+    m.def("exl3_gemm_raw(Tensor xh_blocked, Tensor trellis, Tensor shard_of_nb, int N, int K, int cb, int path) -> Tensor");
+    m.impl("exl3_gemm_raw", torch::kXPU, &exl3_gemm_raw);
     m.def("exl3_set_target_threads(int n) -> ()", &exl3_set_target_threads);
     m.def("exl3_set_vec_max_m(int n) -> ()", &exl3_set_vec_max_m);
 }

@@ -37,25 +37,22 @@ template <int K> struct Geo {
 // Codebooks: 16-bit state -> fp16 value (returned widened to float), bit-exact with exllamav3.
 
 template <int CB, int N>
-ESIMD_INLINE simd<float, N> decode_cb(simd<uint32_t, N> st) {
+ESIMD_INLINE simd<fp16, N> decode_cb_h(simd<uint32_t, N> st) {
+    // Bit-exact with exllamav3 decode_3inst<cb> (CUDA): same integer ops, same fp16 roundings.
     if constexpr (CB == 2) {  // mul1
         simd<uint32_t, N> x = st * 0x83DCD12Du;
 #ifdef EXL3_NO_DP4A
         simd<uint32_t, N> y = (x & 0x00FF00FFu) + ((x >> 8) & 0x00FF00FFu);
         simd<uint32_t, N> bs = (y & 0xFFFFu) + (y >> 16);
+        bs += 1024u;
 #else
-        // byte sum in one instruction: 0 + dot(bytes(x), {1,1,1,1})
+        // 1024 + byte sum in one instruction: 1024 + dot(bytes(x), {1,1,1,1})
         simd<uint32_t, N> bs = dp4a<uint32_t, uint32_t, uint32_t, uint32_t, N>(
-            simd<uint32_t, N>(0u), x, simd<uint32_t, N>(0x01010101u));
+            simd<uint32_t, N>(1024u), x, simd<uint32_t, N>(0x01010101u));
 #endif
-        simd<float, N> f = convert<float>(bs);
-        // (1024 + bs) * inv + bias; the exact fp16-rounded codebook value differs by < 2^-11 relative
-        f = f * 0.00676727294921875f + (1024.0f * 0.00676727294921875f - 10.3828125f);
-#ifdef EXL3_EXACT_FP16
-        return convert<float>(convert<fp16>(f));
-#else
-        return f;
-#endif
+        // 0x6400 + bs as fp16 == 1024 + bs exactly (< 2048); then __hfma(h, 0x1eee, 0xc931)
+        simd<fp16, N> h = convert<fp16>(bs);
+        return h * fp16(0.00676727294921875f) + fp16(-10.3828125f);
     } else {
         simd<uint32_t, N> x;
         if constexpr (CB == 1) x = st * 0xCBAC1FEDu;
@@ -63,10 +60,15 @@ ESIMD_INLINE simd<float, N> decode_cb(simd<uint32_t, N> st) {
         x = (x & 0x8FFF8FFFu) ^ 0x3B603B60u;
         simd<uint16_t, N> lo = convert<uint16_t>(x & 0xFFFFu);
         simd<uint16_t, N> hi = convert<uint16_t>(x >> 16);
-        simd<float, N> a = convert<float>(lo.template bit_cast_view<fp16>().read());
-        simd<float, N> b = convert<float>(hi.template bit_cast_view<fp16>().read());
-        return convert<float>(convert<fp16>(a + b));
+        simd<fp16, N> a = lo.template bit_cast_view<fp16>().read();
+        simd<fp16, N> b = hi.template bit_cast_view<fp16>().read();
+        return a + b;   // __hadd
     }
+}
+
+template <int CB, int N>
+ESIMD_INLINE simd<float, N> decode_cb(simd<uint32_t, N> st) {
+    return convert<float>(decode_cb_h<CB, N>(st));
 }
 
 // state for value u of every period in a tile: words dw [WORDS]
@@ -311,7 +313,7 @@ struct DpasKernel {
                 if constexpr (s == 0) st = Bw;
                 else st = (Aw << (32 - s)) | (Bw >> s);
             }
-            simd<fp16, G> v = convert<fp16>(decode_cb<CB, G>(st & 0xFFFFu));
+            simd<fp16, G> v = decode_cb_h<CB, G>(st & 0xFFFFu);
             constexpr int h = (u >> 2) & 1;
             constexpr int R = 4 * ((u >> 1) & 1) + ((u >> 3) & 3);      // row0(u) / 2
             constexpr int C0 = 16 * h + (u & 1);
@@ -385,6 +387,73 @@ struct DpasKernel {
                 if (m < mrows)
                     block_store<float, 16>(part + ((size_t)p * M + m0 + m) * N + (tile_n0 + j) * 16,
                                            acc.template select<16, 1>((j * MB + m) * 16));
+    }
+};
+
+
+// ------------------------------------------------------------------------------------------------
+// Reconstruct W_inner (Hadamard domain) as fp16 [Kdim, n_out], columns [n0, n0 + n_out) of the
+// packed tensor. Thread = (tile-row, strip of NT tiles). Bit-exact.
+
+template <int K, int CB, int NT>
+struct ReconstructKernel {
+    const uint32_t* tr; fp16* w;
+    int tiles_n, tile_n0, n_out, n_strips, tk;
+    static constexpr int G = Geo<K>::G, V = Geo<K>::V, D = Geo<K>::D, W = Geo<K>::WORDS;
+    static constexpr int P = V == 8 ? 4 : (V == 16 ? 2 : 1);
+    static constexpr int STR = V == 8 ? 2 : (V == 16 ? 4 : 1);
+
+    template <int u>
+    static ESIMD_INLINE void build(simd<uint32_t, W>& dw, simd<uint32_t, W>& dwprev, simd<fp16, 256>& T) {
+        if constexpr (u < V) {
+            constexpr int e = (u + 1) * K;
+            constexpr int i1 = (e - 1) / 32;
+            constexpr int b0 = e - 16;
+            constexpr int i0 = b0 >= 0 ? b0 / 32 : -1;
+            constexpr int s = (i1 + 1) * 32 - e;
+            simd<uint32_t, G> Bw = dw.template replicate_vs_w_hs<P, D, 8, D * P>(i1);
+            simd<uint32_t, G> st;
+            if constexpr (i0 == i1) st = Bw >> s;
+            else {
+                simd<uint32_t, G> Aw;
+                if constexpr (i0 >= 0) Aw = dw.template replicate_vs_w_hs<P, D, 8, D * P>(i0);
+                else Aw = dwprev.template replicate_vs_w_hs<P, D, 8, D * P>(0);
+                if constexpr (s == 0) st = Bw; else st = (Aw << (32 - s)) | (Bw >> s);
+            }
+            simd<fp16, G> v = decode_cb_h<CB, G>(st & 0xFFFFu);
+            constexpr int h = (u >> 2) & 1;
+            constexpr int R0 = 8 * ((u >> 1) & 1) + 2 * ((u >> 3) & 3) + (u & 1);
+            auto Tm = T.template bit_cast_view<fp16, 16, 16>();
+#pragma unroll
+            for (int b = 0; b < P; ++b)
+                Tm.template select<1, 1, 8, 1>(R0 + STR * b, 8 * h) = v.template select<8, 1>(8 * b);
+            build<u + 1>(dw, dwprev, T);
+        }
+    }
+
+    void operator()(sycl::nd_item<1> it) const SYCL_ESIMD_KERNEL {
+        int id = it.get_global_id(0);
+        int strip = id % n_strips;
+        int r = id / n_strips;
+        if (r >= tk) return;
+        int t0 = tile_n0 + strip * NT;
+        simd<uint32_t, NT * W> words = block_load<uint32_t, NT * W>(tr + ((size_t)r * tiles_n + t0) * W);
+        simd<fp16, 16 * 16 * NT> out;   // [16 rows][16*NT cols]
+        auto Om = out.template bit_cast_view<fp16, 16, 16 * NT>();
+#pragma unroll
+        for (int j = 0; j < NT; ++j) {
+            simd<uint32_t, W> dw = words.template select<W, 1>(j * W);
+            simd<uint32_t, W> dwprev;
+            dwprev.template select<W - 1, 1>(1) = dw.template select<W - 1, 1>(0);
+            dwprev[0] = dw[W - 1];
+            simd<fp16, 256> T;
+            build<0>(dw, dwprev, T);
+            Om.template select<16, 1, 16, 1>(0, 16 * j) = T.template bit_cast_view<fp16, 16, 16>();
+        }
+#pragma unroll
+        for (int rr = 0; rr < 16; ++rr)
+            block_store<fp16, 16 * NT>(w + ((size_t)r * 16 + rr) * n_out + strip * NT * 16,
+                                       out.template select<16 * NT, 1>(rr * 16 * NT));
     }
 };
 
