@@ -1,0 +1,126 @@
+// Host launchers + torch bindings for EXL3 ESIMD kernels.
+#include <torch/all.h>
+#include <torch/library.h>
+#include <c10/xpu/XPUStream.h>
+#include "exl3_esimd.h"
+
+using namespace exl3;
+
+static sycl::queue& queue_of(const at::Tensor& t) {
+    return c10::xpu::getCurrentXPUStream(t.device().index()).queue();
+}
+
+static int round_up(int a, int b) { return (a + b - 1) / b * b; }
+
+template <typename TIn>
+static void launch_had_in(const at::Tensor& x, const at::Tensor& suh, at::Tensor& xh, sycl::queue& q) {
+    int M = x.size(0), Kdim = x.size(1), S = suh.size(0);
+    int n = S * M * (Kdim / 128);
+    HadInKernel<TIn> k{reinterpret_cast<const TIn*>(x.data_ptr()), reinterpret_cast<const fp16*>(suh.data_ptr()),
+                       reinterpret_cast<fp16*>(xh.data_ptr()), M, Kdim, S, (int)x.stride(0)};
+    int local = 8;
+    q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
+}
+
+template <typename TOut>
+static void launch_had_out(const at::Tensor& part, int P, const at::Tensor& svh, at::Tensor& out, sycl::queue& q) {
+    int M = out.size(0), N = out.size(1);
+    int n = M * (N / 128);
+    HadOutKernel<TOut> k{part.data_ptr<float>(), reinterpret_cast<const fp16*>(svh.data_ptr()),
+                         reinterpret_cast<TOut*>(out.data_ptr()), M, N, P, (int)out.stride(0)};
+    int local = 8;
+    q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
+}
+
+template <int K, int CB, int MR, int NT>
+static void launch_gemv(const at::Tensor& xh, const at::Tensor& tr, const at::Tensor& shard, at::Tensor& part,
+                        int M, int Kdim, int N, int P, int rows_per_split, sycl::queue& q) {
+    int tiles_n = N / 16;
+    int n_strips = tiles_n / NT;
+    GemvKernel<K, CB, MR, NT> k{reinterpret_cast<const fp16*>(xh.data_ptr()),
+                                reinterpret_cast<const uint32_t*>(tr.data_ptr()),
+                                shard.data_ptr<int>(), part.data_ptr<float>(),
+                                M, Kdim, N, tiles_n, rows_per_split, n_strips};
+    int n = n_strips * P;
+    int local = 8;
+    q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
+}
+
+static int g_target_threads = 4096;
+
+template <int K, int CB>
+static bool dispatch_mr(int MR, const at::Tensor& xh, const at::Tensor& tr, const at::Tensor& shard,
+                        at::Tensor& part, int M, int Kdim, int N, int P, int rps, sycl::queue& q) {
+    constexpr int NTs = (K <= 4) ? 4 : 2;
+    switch (MR) {
+        case 1: launch_gemv<K, CB, 1, NTs>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+        case 2: launch_gemv<K, CB, 2, NTs>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+        case 4: launch_gemv<K, CB, 4, NTs>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+        case 8: launch_gemv<K, CB, 8, 2>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+    }
+    return false;
+}
+
+static int nt_for(int K, int MR) { return MR == 8 ? 2 : (K <= 4 ? 4 : 2); }
+
+void exl3_gemm_small(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Tensor svh, at::Tensor shard_of_nb,
+                     at::Tensor out, int64_t K, int64_t cb) {
+    TORCH_CHECK(x.dim() == 2 && x.stride(1) == 1, "x must be 2D row-major");
+    TORCH_CHECK(trellis.scalar_type() == at::kShort && trellis.is_contiguous());
+    auto& q = queue_of(x);
+    int M = x.size(0), Kdim = x.size(1), N = svh.size(0), S = suh.size(0);
+    TORCH_CHECK(M <= 8, "exl3_gemm_small: M <= 8");
+    int MR = M <= 1 ? 1 : (M <= 2 ? 2 : (M <= 4 ? 4 : 8));
+    auto xh = at::empty({S, M, Kdim}, x.options().dtype(at::kHalf));
+    if (x.scalar_type() == at::kHalf) launch_had_in<fp16>(x, suh, xh, q);
+    else if (x.scalar_type() == at::kBFloat16) launch_had_in<sycl::ext::oneapi::bfloat16>(x, suh, xh, q);
+    else TORCH_CHECK(false, "x dtype");
+
+    int tk = Kdim / 16;
+    int n_strips = (N / 16) / nt_for(K, MR);
+    int P = std::max(1, std::min(tk, (g_target_threads + n_strips - 1) / n_strips));
+    int rps = (tk + P - 1) / P;
+    P = (tk + rps - 1) / rps;
+    auto part = at::empty({P, M, N}, x.options().dtype(at::kFloat));
+
+    bool ok = false;
+#define EXL3_CASE(KK, CC) \
+    if (K == KK && cb == CC) ok = dispatch_mr<KK, CC>(MR, xh, trellis, shard_of_nb, part, M, Kdim, N, P, rps, q);
+#ifndef EXL3_PROBE_NO_GEMV
+#ifndef EXL3_PROBE_NO_K4
+    EXL3_CASE(4, 2)
+#endif
+#ifndef EXL3_PROBE_NO_K6
+    EXL3_CASE(6, 2)
+#endif
+#endif
+#ifdef EXL3_ALL_CODEBOOKS
+    EXL3_CASE(2, 2) EXL3_CASE(3, 2) EXL3_CASE(5, 2)
+    EXL3_CASE(4, 0) EXL3_CASE(4, 1) EXL3_CASE(6, 0) EXL3_CASE(6, 1)
+#endif
+#undef EXL3_CASE
+    TORCH_CHECK(ok, "exl3_gemm_small: unsupported K/codebook ", K, "/", cb);
+
+    if (out.scalar_type() == at::kHalf) launch_had_out<fp16>(part, P, svh, out, q);
+    else if (out.scalar_type() == at::kBFloat16) launch_had_out<sycl::ext::oneapi::bfloat16>(part, P, svh, out, q);
+    else if (out.scalar_type() == at::kFloat) launch_had_out<float>(part, P, svh, out, q);
+    else TORCH_CHECK(false, "out dtype");
+}
+
+bool exl3_supported(int64_t K, int64_t cb) {
+    if (cb == 2 && (K == 4 || K == 6)) return true;
+#ifdef EXL3_ALL_CODEBOOKS
+    if (cb == 2 && (K == 2 || K == 3 || K == 5)) return true;
+    if ((cb == 0 || cb == 1) && (K == 4 || K == 6)) return true;
+#endif
+    return false;
+}
+
+void exl3_set_target_threads(int64_t n) { g_target_threads = (int)n; }
+
+TORCH_LIBRARY(exl3xpu_C, m) {
+    m.def("exl3_gemm_small(Tensor x, Tensor trellis, Tensor suh, Tensor svh, Tensor shard_of_nb, Tensor(a!) out, int K, int cb) -> ()");
+    m.impl("exl3_gemm_small", torch::kXPU, &exl3_gemm_small);
+    m.def("exl3_supported(int K, int cb) -> bool", &exl3_supported);
+    m.def("exl3_set_target_threads(int n) -> ()", &exl3_set_target_threads);
+}

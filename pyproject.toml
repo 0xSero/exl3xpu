@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "exl3xpu"
+version = "0.1.0"
+description = "EXL3 (exllamav3 trellis) quantization for vLLM on Intel Arc (XPU)"
+requires-python = ">=3.10"
+
+[project.entry-points."vllm.general_plugins"]
+exl3xpu = "exl3xpu.vllm_plugin:register"
+
+[tool.setuptools]
+packages = ["exl3xpu"]
