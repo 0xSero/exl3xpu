@@ -10,7 +10,7 @@ from . import triton_kernels as tk
 
 # Rows at or below this use the fused decode-in-GEMM kernel; above it we reconstruct fp16
 # weight slices and use the oneDNN GEMM (compute bound regime).
-SMALL_M_MAX = int(os.environ.get("EXL3_SMALL_M_MAX", "16"))
+SMALL_M_MAX = int(os.environ.get("EXL3_SMALL_M_MAX", "128"))
 RECON_SLICE_N = int(os.environ.get("EXL3_RECON_SLICE_N", "16384"))
 
 _backend = os.environ.get("EXL3_BACKEND", "auto")
@@ -57,7 +57,7 @@ def exl3_linear_impl(x: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, 
     esimd = _get_esimd() if _backend in ("auto", "esimd") else False
 
     if M <= SMALL_M_MAX:
-        if esimd and M <= 8 and esimd.exl3_supported(K, cb):
+        if esimd and esimd.exl3_supported(K, cb):
             esimd.exl3_gemm_small(x2, trellis, suh, svh, shard_of_nb, out, K, cb)
         else:
             xh = tk.had_in(x2, suh)

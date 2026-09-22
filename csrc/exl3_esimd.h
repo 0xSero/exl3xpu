@@ -15,6 +15,7 @@
 
 #include <sycl/sycl.hpp>
 #include <sycl/ext/intel/esimd.hpp>
+#include <sycl/ext/intel/esimd/xmx/dpas.hpp>
 
 namespace exl3 {
 
@@ -136,7 +137,12 @@ struct HadInKernel {
         v = convert<float>(convert<fp16>(v));
         fwht128(v);
         v *= kRsqrt128;
-        block_store<fp16, 128>(xh + ((size_t)g * M + m) * Kdim + kb * 128, convert<fp16>(v));
+        // blocked layout xh[g][k/16][m][16]: a tile-row's A block for all M rows is contiguous
+        simd<fp16, 128> vh = convert<fp16>(v);
+        int kt = Kdim / 16;
+#pragma unroll
+        for (int i = 0; i < 8; ++i)
+            block_store<fp16, 16>(xh + (((size_t)g * kt + kb * 8 + i) * M + m) * 16, vh.template select<16, 1>(i * 16));
     }
 };
 
@@ -220,17 +226,21 @@ struct GemvKernel {
         if (r1 > Kdim / 16) r1 = Kdim / 16;
 
         simd<float, ACC> acc = 0.0f;
-        const fp16* xbase = xh + (size_t)shard * M * Kdim;
+        const fp16* xbase = xh + (size_t)shard * M * Kdim;   // blocked [k/16][M][16]
 
         for (int r = r0; r < r1; ++r) {
             simd<uint32_t, NT * W> words =
                 block_load<uint32_t, NT * W>(tr + ((size_t)r * tiles_n + tile_n0) * W);
             simd<float, MR * 16> xr = 0.0f;
+            if (M == MR) {
+                xr = convert<float>(block_load<fp16, MR * 16>(xbase + (size_t)r * M * 16));
+            } else {
 #pragma unroll
-            for (int m = 0; m < MR; ++m)
-                if (m < M)
-                    xr.template select<16, 1>(m * 16) =
-                        convert<float>(block_load<fp16, 16>(xbase + (size_t)m * Kdim + r * 16));
+                for (int m = 0; m < MR; ++m)
+                    if (m < M)
+                        xr.template select<16, 1>(m * 16) =
+                            convert<float>(block_load<fp16, 16>(xbase + ((size_t)r * M + m) * 16));
+            }
             step<0>(words, xr, acc);
         }
 
@@ -254,6 +264,127 @@ struct GemvKernel {
                 block_store<float, 16>(part + ((size_t)p * M + m) * N + (tile_n0 + j) * 16, o);
             }
         }
+    }
+};
+
+// ------------------------------------------------------------------------------------------------
+// DPAS (XMX) trellis GEMM for batched decode: one EXL3 16x16 tile == one DPAS B operand
+// (K16 x N16, VNNI: element (k, n) at ((k>>1)*16 + n)*2 + (k&1)). Decoding each tile once feeds
+// MB/8 DPAS ops, so decode cost is amortised over the whole batch block.
+//
+// Writing decoded lanes straight into VNNI: with grp = P*a + b (P = 32/V... see below) the value
+// (grp, u) lands at VNNI matrix [8][32] row = R(u) + MS*b, col = 16*h(u) + (u&1) + 2*a, a in 0..7.
+// Reading the trellis words in (b-major, a-minor) lane order (a transpose folded into the word
+// read) lets each b-row be written with one strided region move.
+
+template <int K, int CB, int MB, int NT>
+struct DpasKernel {
+    const fp16* xh;          // [S, M, Kdim]
+    const uint32_t* tr;      // [Kdim/16, N/16, 8K]
+    const int* shard_of_nb;  // [N/128]
+    float* part;             // [P, M, N]
+    int M, Kdim, N, tiles_n, rows_per_split, n_strips, m_blocks;
+
+    static constexpr int G = Geo<K>::G, V = Geo<K>::V, D = Geo<K>::D, W = Geo<K>::WORDS;
+    static constexpr int P = V == 8 ? 4 : (V == 16 ? 2 : 1);   // grp period in rows
+    static constexpr int A_ = G / P;                            // == 8
+    static constexpr int MS = 4 / P;                            // VNNI-row stride per b
+    static_assert(A_ == 8, "lane geometry");
+
+    template <int u>
+    static ESIMD_INLINE void build(simd<uint32_t, W>& dw, simd<uint32_t, W>& dwprev, simd<fp16, 256>& Bv) {
+        if constexpr (u < V) {
+            constexpr int e = (u + 1) * K;
+            constexpr int i1 = (e - 1) / 32;
+            constexpr int b0 = e - 16;
+            constexpr int i0 = b0 >= 0 ? b0 / 32 : -1;
+            constexpr int s = (i1 + 1) * 32 - e;
+            // transpose-read: lane L = 8*b + a  <->  word D*(P*a + b) + i
+            simd<uint32_t, G> Bw = dw.template replicate_vs_w_hs<P, D, 8, D * P>(i1);
+            simd<uint32_t, G> st;
+            if constexpr (i0 == i1) {
+                st = Bw >> s;
+            } else {
+                simd<uint32_t, G> Aw;
+                if constexpr (i0 >= 0) Aw = dw.template replicate_vs_w_hs<P, D, 8, D * P>(i0);
+                else Aw = dwprev.template replicate_vs_w_hs<P, D, 8, D * P>(0);
+                if constexpr (s == 0) st = Bw;
+                else st = (Aw << (32 - s)) | (Bw >> s);
+            }
+            simd<fp16, G> v = convert<fp16>(decode_cb<CB, G>(st & 0xFFFFu));
+            constexpr int h = (u >> 2) & 1;
+            constexpr int R = 4 * ((u >> 1) & 1) + ((u >> 3) & 3);      // row0(u) / 2
+            constexpr int C0 = 16 * h + (u & 1);
+            auto Bm = Bv.template bit_cast_view<fp16, 8, 32>();
+#pragma unroll
+            for (int b = 0; b < P; ++b)
+                Bm.template select<1, 1, 8, 2>(R + MS * b, C0) = v.template select<8, 1>(8 * b);
+            build<u + 1>(dw, dwprev, Bv);
+        }
+    }
+
+    void operator()(sycl::nd_item<1> it) const SYCL_ESIMD_KERNEL {
+        int id = it.get_global_id(0);
+        int strip = id % n_strips;
+        int rest = id / n_strips;
+        int mb = rest % m_blocks;
+        int p = rest / m_blocks;
+        if (p * rows_per_split >= Kdim / 16) return;
+        int tile_n0 = strip * NT;
+        int shard = shard_of_nb[(tile_n0 * 16) / 128];
+        int r0 = p * rows_per_split;
+        int r1 = r0 + rows_per_split;
+        if (r1 > Kdim / 16) r1 = Kdim / 16;
+        int m0 = mb * MB;
+        int mrows = M - m0; if (mrows > MB) mrows = MB;
+
+        simd<float, MB * 16 * NT> acc = 0.0f;   // [NT][MB][16]
+        const fp16* xbase = xh + (size_t)shard * M * Kdim;   // blocked [k/16][M][16]
+
+        for (int r = r0; r < r1; ++r) {
+            simd<uint32_t, NT * W> words =
+                block_load<uint32_t, NT * W>(tr + ((size_t)r * tiles_n + tile_n0) * W);
+            simd<fp16, MB * 16> Am;
+            const fp16* arow = xbase + ((size_t)r * M + m0) * 16;
+            if (mrows == MB) {
+                Am = block_load<fp16, MB * 16>(arow);
+            } else {
+                Am = 0;
+#pragma unroll
+                for (int m8 = 0; m8 < MB; m8 += 8) {
+                    if (m8 + 8 <= mrows) Am.template select<128, 1>(m8 * 16) = block_load<fp16, 128>(arow + m8 * 16);
+                    else {
+#pragma unroll
+                        for (int m = 0; m < 8; ++m)
+                            if (m8 + m < mrows)
+                                Am.template select<16, 1>((m8 + m) * 16) = block_load<fp16, 16>(arow + (m8 + m) * 16);
+                    }
+                }
+            }
+#pragma unroll
+            for (int j = 0; j < NT; ++j) {
+                simd<uint32_t, W> dw = words.template select<W, 1>(j * W);
+                // previous-period last word per period start: dwprev[D*g] = dw[D*g - 1] (wrap)
+                simd<uint32_t, W> dwprev;
+                dwprev.template select<W - 1, 1>(1) = dw.template select<W - 1, 1>(0);
+                dwprev[0] = dw[W - 1];
+                simd<fp16, 256> Bv;
+                build<0>(dw, dwprev, Bv);
+#pragma unroll
+                for (int rb = 0; rb < MB / 8; ++rb) {
+                    auto c = acc.template select<128, 1>((j * MB + rb * 8) * 16);
+                    c = xmx::dpas<8, 8, float, float, fp16, fp16>(
+                        simd<float, 128>(c), Bv, simd<fp16, 128>(Am.template select<128, 1>(rb * 128)));
+                }
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < NT; ++j)
+#pragma unroll
+            for (int m = 0; m < MB; ++m)
+                if (m < mrows)
+                    block_store<float, 16>(part + ((size_t)p * M + m0 + m) * N + (tile_n0 + j) * 16,
+                                           acc.template select<16, 1>((j * MB + m) * 16));
     }
 };
 

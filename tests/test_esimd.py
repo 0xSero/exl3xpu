@@ -34,7 +34,7 @@ for key in keys:
     k, n = suh.shape[0], svh.shape[0]
     shard = torch.zeros(n // 128, dtype=torch.int32, device=dev)
     wbytes = tr.numel() * 2
-    for M in [1, 2, 4, 8]:
+    for M in [int(v) for v in os.environ.get('MS','1,4,8,16,32,64').split(',')]:
         x = torch.randn(M, k, dtype=torch.float16, device=dev)
         out = torch.empty((M, n), dtype=torch.float16, device=dev)
         f = lambda: E.exl3_gemm_small(x, tr, suh.unsqueeze(0), svh, shard, out, K, 2)

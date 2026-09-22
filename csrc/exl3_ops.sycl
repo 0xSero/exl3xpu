@@ -46,6 +46,36 @@ static void launch_gemv(const at::Tensor& xh, const at::Tensor& tr, const at::Te
     q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
 }
 
+template <int K, int CB, int MB, int NT>
+static void launch_dpas(const at::Tensor& xh, const at::Tensor& tr, const at::Tensor& shard, at::Tensor& part,
+                        int M, int Kdim, int N, int P, int rows_per_split, sycl::queue& q) {
+    int tiles_n = N / 16;
+    int n_strips = tiles_n / NT;
+    int m_blocks = (M + MB - 1) / MB;
+    DpasKernel<K, CB, MB, NT> k{reinterpret_cast<const fp16*>(xh.data_ptr()),
+                                reinterpret_cast<const uint32_t*>(tr.data_ptr()),
+                                shard.data_ptr<int>(), part.data_ptr<float>(),
+                                M, Kdim, N, tiles_n, rows_per_split, n_strips, m_blocks};
+    int n = n_strips * m_blocks * P;
+    int local = 8;
+    q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
+}
+
+template <int K, int CB>
+static bool dispatch_dpas(int MB, const at::Tensor& xh, const at::Tensor& tr, const at::Tensor& shard,
+                          at::Tensor& part, int M, int Kdim, int N, int P, int rps, sycl::queue& q) {
+    switch (MB) {
+        case 8:  launch_dpas<K, CB, 8, 4>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+        case 16: launch_dpas<K, CB, 16, 4>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+        case 32: launch_dpas<K, CB, 32, 2>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+        case 64: launch_dpas<K, CB, 64, 1>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+    }
+    return false;
+}
+
+static int dpas_nt(int MB) { return MB <= 16 ? 4 : (MB == 32 ? 2 : 1); }
+static int g_vec_max_m = 4;
+
 static int g_target_threads = 4096;
 
 template <int K, int CB>
@@ -69,31 +99,28 @@ void exl3_gemm_small(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Tenso
     TORCH_CHECK(trellis.scalar_type() == at::kShort && trellis.is_contiguous());
     auto& q = queue_of(x);
     int M = x.size(0), Kdim = x.size(1), N = svh.size(0), S = suh.size(0);
-    TORCH_CHECK(M <= 8, "exl3_gemm_small: M <= 8");
-    int MR = M <= 1 ? 1 : (M <= 2 ? 2 : (M <= 4 ? 4 : 8));
     auto xh = at::empty({S, M, Kdim}, x.options().dtype(at::kHalf));
     if (x.scalar_type() == at::kHalf) launch_had_in<fp16>(x, suh, xh, q);
     else if (x.scalar_type() == at::kBFloat16) launch_had_in<sycl::ext::oneapi::bfloat16>(x, suh, xh, q);
     else TORCH_CHECK(false, "x dtype");
 
+    bool use_vec = M <= g_vec_max_m;
+    int MR = M <= 1 ? 1 : (M <= 2 ? 2 : (M <= 4 ? 4 : 8));
+    int MB = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 32 ? 32 : 64));
+    int m_blocks = use_vec ? 1 : (M + MB - 1) / MB;
     int tk = Kdim / 16;
-    int n_strips = (N / 16) / nt_for(K, MR);
-    int P = std::max(1, std::min(tk, (g_target_threads + n_strips - 1) / n_strips));
+    int n_strips = (N / 16) / (use_vec ? nt_for(K, MR) : dpas_nt(MB));
+    int units = n_strips * m_blocks;
+    int P = std::max(1, std::min(tk, (g_target_threads + units - 1) / units));
     int rps = (tk + P - 1) / P;
     P = (tk + rps - 1) / rps;
     auto part = at::empty({P, M, N}, x.options().dtype(at::kFloat));
 
     bool ok = false;
 #define EXL3_CASE(KK, CC) \
-    if (K == KK && cb == CC) ok = dispatch_mr<KK, CC>(MR, xh, trellis, shard_of_nb, part, M, Kdim, N, P, rps, q);
-#ifndef EXL3_PROBE_NO_GEMV
-#ifndef EXL3_PROBE_NO_K4
-    EXL3_CASE(4, 2)
-#endif
-#ifndef EXL3_PROBE_NO_K6
-    EXL3_CASE(6, 2)
-#endif
-#endif
+    if (K == KK && cb == CC) ok = use_vec ? dispatch_mr<KK, CC>(MR, xh, trellis, shard_of_nb, part, M, Kdim, N, P, rps, q) \
+                                          : dispatch_dpas<KK, CC>(MB, xh, trellis, shard_of_nb, part, M, Kdim, N, P, rps, q);
+    EXL3_CASE(4, 2) EXL3_CASE(6, 2)
 #ifdef EXL3_ALL_CODEBOOKS
     EXL3_CASE(2, 2) EXL3_CASE(3, 2) EXL3_CASE(5, 2)
     EXL3_CASE(4, 0) EXL3_CASE(4, 1) EXL3_CASE(6, 0) EXL3_CASE(6, 1)
@@ -117,10 +144,12 @@ bool exl3_supported(int64_t K, int64_t cb) {
 }
 
 void exl3_set_target_threads(int64_t n) { g_target_threads = (int)n; }
+void exl3_set_vec_max_m(int64_t n) { g_vec_max_m = (int)n; }
 
 TORCH_LIBRARY(exl3xpu_C, m) {
     m.def("exl3_gemm_small(Tensor x, Tensor trellis, Tensor suh, Tensor svh, Tensor shard_of_nb, Tensor(a!) out, int K, int cb) -> ()");
     m.impl("exl3_gemm_small", torch::kXPU, &exl3_gemm_small);
     m.def("exl3_supported(int K, int cb) -> bool", &exl3_supported);
     m.def("exl3_set_target_threads(int n) -> ()", &exl3_set_target_threads);
+    m.def("exl3_set_vec_max_m(int n) -> ()", &exl3_set_vec_max_m);
 }
