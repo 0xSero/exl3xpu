@@ -1,0 +1,4 @@
+.git
+logs
+**/__pycache__
+**/*.so

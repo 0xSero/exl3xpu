@@ -1,0 +1,38 @@
+# Serving config for one model. Everything model-specific lives here; the engine core
+# (exl3xpu/, csrc/) knows nothing about Qwen. Consumed by scripts/serve.py.
+
+id: qwen3.8-27b-exl3-4.00bpw
+served_model_name: qwen3.8-27b-exl3
+
+source:
+  repo: turboderp/Qwen3.8-27B-exl3
+  revision: 113cf7ab958054860e43fb7f3063b1af19171095   # branch 4.00bpw
+  quant: exl3 1.4.2, 4.00 bpw (lm_head 6 bpw), codebook mul1
+  notes: >
+    Hybrid Qwen3.5-architecture dense model: 64 layers (48 Gated DeltaNet + 16 gated full attention),
+    hidden 5120. in_proj_a/in_proj_b, norms and embeddings are unquantized bf16. The checkpoint ships no
+    MTP head and no vision tower, so it is served language-model-only.
+
+# Per-B70 replica. Weights 14.9 GiB; the rest is KV / GDN state.
+vllm:
+  dtype: float16
+  language_model_only: true
+  max_model_len: 32768
+  gpu_memory_utilization: 0.90
+  max_num_seqs: 64
+  max_num_batched_tokens: 8192
+  trust_remote_code: true
+  compilation_config:
+    cudagraph_mode: FULL_DECODE_ONLY
+    cudagraph_capture_sizes: [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64]
+
+env:
+  VLLM_XPU_ENABLE_XPU_GRAPH: "1"
+  VLLM_WORKER_MULTIPROC_METHOD: spawn
+
+# Data parallel: one replica per GPU behind scripts/lb.py (the model fits one 32 GB B70).
+parallel:
+  mode: data
+  gpus: [0, 1]
+  base_port: 8100
+  lb_port: 8000

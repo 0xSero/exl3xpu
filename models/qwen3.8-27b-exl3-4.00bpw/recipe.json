@@ -1,0 +1,248 @@
+{
+ "id": "qwen38-27b-exl3-4bpw-arcb70-vllm-exl3xpu-tp1",
+ "status": "candidate",
+ "description": "Qwen3.8-27B EXL3 4.00bpw (turboderp) on one Intel Arc Pro B70 via vLLM 0.26.1 XPU + the exl3xpu plugin (bit-exact trellis decode in ESIMD: dp4a GEMV for M<=4, DPAS GEMM for batched decode, reconstruct+oneDNN for prefill). Beats the tuned llama.cpp SYCL Q4_K_M recipe on every measured cell on the same card.",
+ "model": {
+  "repo": "turboderp/Qwen3.8-27B-exl3",
+  "revision": "113cf7ab958054860e43fb7f3063b1af19171095",
+  "branch": "4.00bpw",
+  "format": "exl3",
+  "bits": 4.0,
+  "head_bits": 6
+ },
+ "hardware_id": "intel-arc-pro-b70-32gb",
+ "hardware_count": 1,
+ "engine": {
+  "name": "vllm",
+  "version": "0.26.1.dev0+g568afb3a1 (xpu)",
+  "plugin": "exl3xpu 0.1.0",
+  "base_image": "intel/llm-scaler-vllm:0.26.0-b2",
+  "torch": "2.12.0+xpu"
+ },
+ "launch": {
+  "config": "models/qwen3.8-27b-exl3-4.00bpw/model.yaml",
+  "command": "python3 scripts/serve.py models/qwen3.8-27b-exl3-4.00bpw --gpu 0",
+  "docker": "docker run --device /dev/dri --group-add render --shm-size 32g --network host -v $MODELS:/models -e MODELS_DIR=/models exl3xpu:latest"
+ },
+ "capabilities": {
+  "chat": true,
+  "reasoning": true,
+  "tools": "untested",
+  "vision": false
+ },
+ "serving": {
+  "max_context_tokens": 32768,
+  "max_concurrency": 64,
+  "kv_cache_tokens": 161031,
+  "weights_gib": 14.91,
+  "data_parallel_replicas": 1
+ },
+ "correctness": {
+  "weights_bit_exact": "PASS: all 401 EXL3 tensors (25.6G weights) bit-identical to exllamav3 reconstruct on reconstruct/vector/DPAS paths (tests/test_bitexact_xpu.py)",
+  "logits_vs_exllamav3": "pending (tests/gateA3)",
+  "smoke": "'The capital of France is Paris, and 17 x 23 = 391.' (greedy, thinking off)"
+ },
+ "speed_sweep": [
+  {
+   "kind": "prefill",
+   "concurrency": 1,
+   "context_tokens": 4096,
+   "cache_state": "cold-unique",
+   "flags": [],
+   "prefill_tok_s": 1018.8,
+   "ttft_ms_p50": 7178
+  },
+  {
+   "kind": "prefill",
+   "concurrency": 4,
+   "context_tokens": 4096,
+   "cache_state": "cold-unique",
+   "flags": [],
+   "prefill_tok_s": 1027.2,
+   "ttft_ms_p50": 19078
+  },
+  {
+   "kind": "decode",
+   "concurrency": 1,
+   "context_tokens": 0,
+   "cache_state": "cold-unique",
+   "flags": [],
+   "content_class": "prose",
+   "thinking": false,
+   "temperature": 0.0,
+   "decode_tok_s_total": 28.5,
+   "decode_tok_s_per_stream": 28.63,
+   "ttft_ms_p50": 124,
+   "window_seconds": 40.0,
+   "samples": 2
+  },
+  {
+   "kind": "decode",
+   "concurrency": 8,
+   "context_tokens": 0,
+   "cache_state": "cold-unique",
+   "flags": [],
+   "content_class": "prose",
+   "thinking": false,
+   "temperature": 0.0,
+   "decode_tok_s_total": 151.6,
+   "decode_tok_s_per_stream": 19.35,
+   "ttft_ms_p50": 683,
+   "window_seconds": 40.0,
+   "samples": 16
+  },
+  {
+   "kind": "decode",
+   "concurrency": 16,
+   "context_tokens": 0,
+   "cache_state": "cold-unique",
+   "flags": [],
+   "content_class": "prose",
+   "thinking": false,
+   "temperature": 0.0,
+   "decode_tok_s_total": 239.18,
+   "decode_tok_s_per_stream": 15.27,
+   "ttft_ms_p50": 1258,
+   "window_seconds": 40.0,
+   "samples": 27
+  },
+  {
+   "kind": "decode",
+   "concurrency": 32,
+   "context_tokens": 0,
+   "cache_state": "cold-unique",
+   "flags": [],
+   "content_class": "prose",
+   "thinking": false,
+   "temperature": 0.0,
+   "decode_tok_s_total": 391.2,
+   "decode_tok_s_per_stream": 12.25,
+   "ttft_ms_p50": 2289,
+   "window_seconds": 40.0,
+   "samples": 32
+  },
+  {
+   "kind": "decode",
+   "concurrency": 64,
+   "context_tokens": 0,
+   "cache_state": "cold-unique",
+   "flags": [],
+   "content_class": "prose",
+   "thinking": false,
+   "temperature": 0.0,
+   "decode_tok_s_total": 411.02,
+   "decode_tok_s_per_stream": 10.05,
+   "ttft_ms_p50": 2623,
+   "window_seconds": 40.0,
+   "samples": 41
+  }
+ ],
+ "baseline_llamacpp_same_card": {
+  "recipe": "qwen38-q4km-arcb70-llamacpp-tp1 (ghcr.io/0xsero/qwen38-b70-attested@sha256:6ce7771e..., Q4_K_M @0669b986)",
+  "speed_sweep": [
+   {
+    "kind": "prefill",
+    "concurrency": 1,
+    "context_tokens": 4096,
+    "cache_state": "cold-unique",
+    "flags": [],
+    "prefill_tok_s": 999.1,
+    "ttft_ms_p50": 7339
+   },
+   {
+    "kind": "prefill",
+    "concurrency": 1,
+    "context_tokens": 32768,
+    "cache_state": "cold-unique",
+    "flags": [],
+    "prefill_tok_s": 628.5,
+    "ttft_ms_p50": 92549
+   },
+   {
+    "kind": "decode",
+    "concurrency": 1,
+    "context_tokens": 0,
+    "cache_state": "cold-unique",
+    "flags": [],
+    "content_class": "prose",
+    "thinking": false,
+    "temperature": 0.0,
+    "decode_tok_s_total": 24.85,
+    "decode_tok_s_per_stream": 25.04,
+    "ttft_ms_p50": 266,
+    "window_seconds": 40.0,
+    "samples": 2
+   },
+   {
+    "kind": "decode",
+    "concurrency": 8,
+    "context_tokens": 0,
+    "cache_state": "cold-unique",
+    "flags": [],
+    "content_class": "prose",
+    "thinking": false,
+    "temperature": 0.0,
+    "decode_tok_s_total": 56.8,
+    "decode_tok_s_per_stream": 7.09,
+    "ttft_ms_p50": 6220,
+    "window_seconds": 40.0,
+    "samples": 8
+   },
+   {
+    "kind": "decode",
+    "concurrency": 16,
+    "context_tokens": 0,
+    "cache_state": "cold-unique",
+    "flags": [],
+    "content_class": "prose",
+    "thinking": false,
+    "temperature": 0.0,
+    "decode_tok_s_total": 56.0,
+    "decode_tok_s_per_stream": 3.52,
+    "ttft_ms_p50": 1612,
+    "window_seconds": 40.0,
+    "samples": 16
+   }
+  ],
+  "notes": "--parallel 64 and single-GPU MTP both fail with UR_RESULT_ERROR_DEVICE_LOST; TP2+MTP measured lower (C1 21.0, prefill 4K 341) with GPU_IDLE flags"
+ },
+ "metadata": {
+  "tuned": "partial",
+  "measured": "2026-09-22, bench/sweep.py, cold unique prose prompts, temp 0, thinking off, 15 s warm + 40 s window, one wave",
+  "tuning": [
+   {
+    "step": "Triton decode-in-GEMM",
+    "decode_c1": 7.27,
+    "kept": true
+   },
+   {
+    "step": "ESIMD GEMV + dp4a byte-sum",
+    "decode_c1": 14.43,
+    "kept": true
+   },
+   {
+    "step": "XPU decode graphs",
+    "decode_c1": 28.43,
+    "kept": true
+   },
+   {
+    "step": "DPAS batched kernel + blocked activations",
+    "decode_c64_total": 411.02,
+    "kept": true
+   },
+   {
+    "step": "exact fp16 codebook (bit-exactness)",
+    "cost": "~4% at M=1",
+    "kept": true
+   }
+  ],
+  "pending": [
+   "speculative decoding (DSpark draft; no MTP head in this exl3)",
+   "data parallel x2 measurement",
+   "prefill kernels (fused Hadamard reconstruct)",
+   "32K/128K context cells",
+   "3 measured waves + 95% LCB",
+   "Gate A3"
+  ]
+ }
+}
