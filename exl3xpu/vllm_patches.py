@@ -68,5 +68,83 @@ def patch_gdn_mask_index() -> bool:
     return True
 
 
+FP8KV_PREFILL_MIN_SEQ = 4096
+FP8KV_PREFILL_MIN_QUERY = 64      # genuine prefill chunks only (not MTP verify batches of k+1 tokens)
+
+
+def patch_fp8kv_prefill() -> bool:
+    """Route single-sequence prefill chunks over an fp8 KV cache through block-dequantized fp16 attention
+    (exl3xpu.fp8kv_prefill): the XPU FA2 kernel runs ~1.8x slower on fp8 K/V than on fp16."""
+    try:
+        from vllm.v1.attention.backends import flash_attn as fa_mod
+    except Exception as e:  # noqa
+        logger.warning("exl3xpu: flash_attn backend not importable (%s); fp8-KV prefill patch skipped", e)
+        return False
+    cls = getattr(fa_mod, "FlashAttentionImpl", None)
+    if cls is None or getattr(cls, "_exl3_fp8kv_patched", False):
+        return False
+    from .fp8kv_prefill import prefill_attention
+    orig = cls.forward
+    is_q = fa_mod.is_quantized_kv_cache
+    fp8_dtype = fa_mod.current_platform.fp8_dtype()
+    decoder = fa_mod.AttentionType.DECODER
+
+    def eligible(self, md, output_scale, output_block_scale) -> bool:
+        if md is None or output_scale is not None or output_block_scale is not None:
+            return False
+        if not is_q(self.kv_cache_dtype) or getattr(md, "use_cascade", False):
+            return False
+        if md.max_query_len < FP8KV_PREFILL_MIN_QUERY or md.query_start_loc.shape[0] != 2 \
+                or md.max_seq_len < FP8KV_PREFILL_MIN_SEQ:
+            return False
+        if torch.xpu.is_available() and torch.xpu.is_current_stream_capturing():
+            return False
+        if self.alibi_slopes is not None or getattr(self, "sinks", None) is not None:
+            return False
+        if self.logits_soft_cap not in (None, 0, 0.0) or getattr(self, "dcp_world_size", 1) != 1:
+            return False
+        if getattr(self, "attn_type", decoder) != decoder or not getattr(md, "causal", True):
+            return False
+        sw = getattr(md, "sliding_window", None) or self.sliding_window
+        if sw is not None and tuple(sw) != (-1, -1):
+            return False
+        if getattr(md, "mm_prefix_range_tensor", None) is not None or getattr(md, "rswa_prefix_lens", None) is not None:
+            return False
+        return True
+
+    def forward(self, layer, query, key, value, kv_cache, attn_metadata, output,
+                output_scale=None, output_block_scale=None):
+        md = attn_metadata
+        if not eligible(self, md, output_scale, output_block_scale):
+            return orig(self, layer, query, key, value, kv_cache, attn_metadata, output,
+                        output_scale, output_block_scale)
+        n = md.num_actual_tokens
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache = key_cache.view(fp8_dtype)
+        value_cache = value_cache.view(fp8_dtype)
+        q = query[:n]
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            q = (q.float() * float(layer._q_scale)).to(torch.float16)
+        out = output[:n].view(n, q.shape[1], self.head_size)
+        tmp = out if out.dtype == torch.float16 else torch.empty(out.shape, dtype=torch.float16, device=out.device)
+        # host-side scale copies (no device sync); fall back to the tensors only if vLLM lacks them
+        ks = getattr(layer, "_k_scale_float", None)
+        vs = getattr(layer, "_v_scale_float", None)
+        ks = float(layer._k_scale) if ks is None else float(ks)
+        vs = float(layer._v_scale) if vs is None else float(vs)
+        prefill_attention(q.to(torch.float16), key_cache, value_cache, md.block_table[0], int(md.max_seq_len),
+                          ks, vs, float(self.scale), tmp)
+        if tmp is not out:
+            out.copy_(tmp)
+        return output
+
+    cls.forward = forward
+    cls._exl3_fp8kv_patched = True
+    logger.info("exl3xpu: fp8-KV prefill attention routed through block-dequantized fp16 FA (>= %d tokens)",
+                FP8KV_PREFILL_MIN_SEQ)
+    return True
+
+
 def apply_all():
     patch_gdn_mask_index()
+    patch_fp8kv_prefill()

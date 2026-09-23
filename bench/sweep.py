@@ -246,11 +246,12 @@ async def prefill_cell(args, C, ctx):
     rows = []
     for wave in range(args.prefill_waves):
         recs = [{} for _ in range(C)]
+        prompts = [unique_prompt(ctx, "prose", rnd) for _ in range(C)]      # built (and tokenizer-sized) off the clock
         g_a = sampler.read()
         t0 = time.time()
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3600)) as s:
-            await asyncio.gather(*[stream_one(s, url, args.model, unique_prompt(ctx, "prose", rnd), 1, 0.0, False, r)
-                                   for r in recs])
+            await asyncio.gather(*[stream_one(s, url, args.model, pr, 1, 0.0, False, r)
+                                   for pr, r in zip(prompts, recs)])
         wall = max(r.get("times", [r["t_end"]])[0] if r.get("times") else r["t_end"] for r in recs) - t0
         g_b = sampler.read()
         ptoks = sum(r.get("prompt_tokens") or 0 for r in recs)

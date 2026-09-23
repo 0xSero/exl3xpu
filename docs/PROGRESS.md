@@ -100,3 +100,19 @@ Prompt generator fixed: random-word documents are ~3.5 tokens/word (not 1.9), so
 | draft vocab 256/384/512 blocks | C1 prose 47.7 / 47.2 / 47.6 | 512 kept (flat) |
 | DPAS prev<<2 hoist | 35.23 vs 35.12 ms | no change |
 GPU is PL2-throttled during decode: act 2600 MHz of 2800 (power1_cap 230 W, profile base); needs root to change.
+
+### fp8-KV prefill attention at fp16 speed (2026-09-23)
+Finding: vllm_xpu_kernels FA2 (head_dim 256, GQA 24:4) runs 69-74 TFLOPS on fp16 K/V but 39 TFLOPS on fp8 K/V
+(bench/attn_bench.py). Server A/B at 128K: fp16 KV 1016 tok/s vs fp8 KV 760 tok/s. 256K only fits one B70 with fp8 KV.
+Fix (exl3xpu/fp8kv_prefill.py + vllm_patches.patch_fp8kv_prefill): for single-sequence prefill chunks (>=64
+queries, >=4K context, not under graph capture) gather the cached K/V in 32K-key blocks, dequantize to fp16,
+run the fp16 kernel per block (causal only for the chunk's own keys), merge with log-sum-exp.
+Correctness: tests/test_fp8kv_prefill.py (rel <= 4e-4 vs one full fp16 pass); needle recall at 128K: 3/3 depths.
+Harness fix: prefill prompts are built (tokenizer-sized) before the clock starts.
+
+| ctx | before (fp8 KV) | after | target |
+|---|---|---|---|
+| 4K | 1665 | 1612 | ok |
+| 32K | 1363 | 1531 | ok |
+| 128K | 760 | 1059 | ok |
+| 254K | 508 | 763 | open: needs an attention kernel ~1.6x faster than XPU FA2 at head_dim 256 |
