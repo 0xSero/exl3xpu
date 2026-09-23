@@ -3,6 +3,7 @@
 #include <torch/library.h>
 #include <c10/xpu/XPUStream.h>
 #include "exl3_esimd.h"
+#include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 
 using namespace exl3;
 
@@ -11,6 +12,8 @@ static sycl::queue& queue_of(const at::Tensor& t) {
 }
 
 static int round_up(int a, int b) { return (a + b - 1) / b * b; }
+static int g_local = 8;       // work-group size (threads) for the GEMV / DPAS launches
+void exl3_set_local(int64_t n) { g_local = (int)n; }
 
 template <typename TIn>
 static void launch_had_in(const at::Tensor& x, const at::Tensor& suh, at::Tensor& xh, sycl::queue& q,
@@ -43,7 +46,7 @@ static void launch_gemv(const at::Tensor& xh, const at::Tensor& tr, const at::Te
                                 shard.data_ptr<int>(), part.data_ptr<float>(),
                                 M, Kdim, N, tiles_n, rows_per_split, n_strips};
     int n = n_strips * P;
-    int local = 8;
+    int local = g_local;
     q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
 }
 
@@ -59,8 +62,14 @@ static void launch_dpas(const at::Tensor& xh, const at::Tensor& tr, const at::Te
                                 shard.data_ptr<int>(), part.data_ptr<float>(),
                                 M, Kdim, N, tiles_n, rows_per_split, n_strips, m_blocks, m_blocks * MB};
     int n = n_strips * m_blocks * P;
-    int local = 8;
+    int local = g_local;
+#ifdef EXL3_DPAS_LARGE_GRF
+    // 256-register mode: room for wider strips (more independent tiles per thread) without spills
+    sycl::ext::oneapi::experimental::properties props{sycl::ext::intel::experimental::grf_size<256>};
+    q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), props, k); });
+#else
     q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
+#endif
 }
 
 template <int K, int CB>
@@ -364,4 +373,5 @@ TORCH_LIBRARY(exl3xpu_C, m) {
     m.def("exl3_set_target_threads(int n) -> ()", &exl3_set_target_threads);
     m.def("exl3_set_vec_max_m(int n) -> ()", &exl3_set_vec_max_m);
     m.def("exl3_set_fused(int on) -> ()", &exl3_set_fused);
+    m.def("exl3_set_local(int n) -> ()", &exl3_set_local);
 }

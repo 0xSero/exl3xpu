@@ -45,6 +45,8 @@ def vllm_argv(cfg, path, port, extra):
         argv += ["--revision", cfg["source"]["revision"]]
     for k, val in v.items():
         flag = "--" + k.replace("_", "-")
+        if val is None:
+            continue                  # null in the config / --set k=null drops the flag
         if isinstance(val, bool):
             if val:
                 argv.append(flag)
@@ -58,7 +60,11 @@ def vllm_argv(cfg, path, port, extra):
 def env_for(cfg, gpu):
     env = dict(os.environ)
     mdir = cfg.get("_dir", "")
-    env.update({k: str(v).replace("{model_dir}", mdir) for k, v in (cfg.get("env") or {}).items()})
+    for k, v in (cfg.get("env") or {}).items():
+        if v is None:
+            env.pop(k, None)
+        else:
+            env[k] = str(v).replace("{model_dir}", mdir)
     env["ZE_AFFINITY_MASK"] = str(gpu)
     return env
 
