@@ -1,7 +1,7 @@
 {
  "id": "qwen38-27b-exl3-4bpw-arcb70-vllm-exl3xpu-tp1",
  "status": "candidate",
- "description": "Qwen3.8-27B EXL3 4.00bpw (turboderp) on ONE Intel Arc Pro B70 via vLLM 0.26.1 XPU + the exl3xpu plugin: bit-exact EXL3 trellis decode in ESIMD kernels, MTP speculative decoding (k=3, EXL3 MTP head, pruned draft vocab), fp8 KV cache (267,761 tokens), 262,144-token context, 16 sequences, image + video input. Thinking on: C1 decode 61-77 tok/s, C8 aggregate 284-364 tok/s, cold prefill 1589 (4K) / 1497 (32K) / 1049 (128K) tok/s. Beats the tuned llama.cpp SYCL Q4_K_M recipe on the same card on every cell.",
+ "description": "Qwen3.8-27B EXL3 4.00bpw (turboderp) on ONE Intel Arc Pro B70 via vLLM 0.26.1 XPU + the exl3xpu plugin: bit-exact EXL3 trellis decode in ESIMD kernels, MTP speculative decoding (k=3, EXL3 MTP head, pruned draft vocab), fp8 KV cache (267,761 tokens), 262,144-token context, 16 sequences, image + video input. Thinking on: C1 decode 61-77 tok/s, C8 aggregate 280-367 tok/s, cold prefill 1589 (4K) / 1497 (32K) / 1049 (128K) tok/s. Beats the tuned llama.cpp SYCL Q4_K_M recipe on the same card on every cell.",
  "model": {
   "repo": "turboderp/Qwen3.8-27B-exl3",
   "revision": "113cf7ab958054860e43fb7f3063b1af19171095",
@@ -133,16 +133,16 @@
    "thinking": true,
    "temperature": 0.0,
    "cache_state": "cold-unique",
-   "decode_tok_s_total": 364.38,
-   "decode_tok_s_per_stream": 44.82,
-   "decode_tok_min_total": 21863,
-   "spec_accept_len": 3.057,
-   "ttft_ms_p50": 590,
+   "decode_tok_s_total": 366.97,
+   "decode_tok_s_per_stream": 45.43,
+   "decode_tok_min_total": 22018,
+   "spec_accept_len": 3.082,
+   "ttft_ms_p50": 636,
    "output_tokens_mean": 2048,
    "window_seconds": 60.0,
    "samples": 16,
    "flags": [],
-   "label": "planar-on"
+   "label": "mb48-on"
   },
   {
    "kind": "decode",
@@ -152,18 +152,18 @@
    "thinking": true,
    "temperature": 0.0,
    "cache_state": "cold-unique",
-   "decode_tok_s_total": 343.27,
-   "decode_tok_s_per_stream": 34.0,
-   "decode_tok_min_total": 20596,
-   "spec_accept_len": 3.017,
-   "ttft_ms_p50": 2867,
+   "decode_tok_s_total": 349.08,
+   "decode_tok_s_per_stream": 35.79,
+   "decode_tok_min_total": 20945,
+   "spec_accept_len": 2.998,
+   "ttft_ms_p50": 1561,
    "output_tokens_mean": 2048,
    "window_seconds": 60.0,
    "samples": 20,
    "flags": [
     "KV_BOUND"
    ],
-   "label": "planar-on"
+   "label": "mb48-on"
   },
   {
    "kind": "decode",
@@ -230,16 +230,16 @@
    "thinking": true,
    "temperature": 0.0,
    "cache_state": "cold-unique",
-   "decode_tok_s_total": 283.78,
-   "decode_tok_s_per_stream": 35.75,
-   "decode_tok_min_total": 17027,
-   "spec_accept_len": 2.439,
-   "ttft_ms_p50": 644,
+   "decode_tok_s_total": 280.13,
+   "decode_tok_s_per_stream": 34.47,
+   "decode_tok_min_total": 16808,
+   "spec_accept_len": 2.441,
+   "ttft_ms_p50": 676,
    "output_tokens_mean": 2048,
    "window_seconds": 60.0,
    "samples": 16,
    "flags": [],
-   "label": "planar-on"
+   "label": "mb48-on"
   },
   {
    "kind": "decode",
@@ -249,18 +249,18 @@
    "thinking": true,
    "temperature": 0.0,
    "cache_state": "cold-unique",
-   "decode_tok_s_total": 279.42,
-   "decode_tok_s_per_stream": 27.43,
-   "decode_tok_min_total": 16765,
-   "spec_accept_len": 2.507,
-   "ttft_ms_p50": 3877,
+   "decode_tok_s_total": 294.62,
+   "decode_tok_s_per_stream": 28.41,
+   "decode_tok_min_total": 17677,
+   "spec_accept_len": 2.54,
+   "ttft_ms_p50": 5161,
    "output_tokens_mean": 2048,
    "window_seconds": 60.0,
    "samples": 20,
    "flags": [
     "KV_BOUND"
    ],
-   "label": "planar-on"
+   "label": "mb48-on"
   },
   {
    "kind": "decode",
@@ -466,12 +466,12 @@
  },
  "metadata": {
   "tuned": "ladder climbed (docs/PROGRESS.md)",
-  "measured": "2026-09-23 (planar K=6 build 551c831), thinking ON only, bench/sweep.py, cold unique prompts, temp 0, warm 20 s + 60 s window, one wave; raw rows bench/results/2026-09-23.jsonl",
+  "measured": "2026-09-23 thinking ON only; C1-C4 on the planar build (551c831), C8/C16 on the MB24/40/48 build (0636d40); bench/sweep.py, cold unique prompts, temp 0, warm 20 s + 60 s window; raw rows bench/results/2026-09-23.jsonl",
   "headline": {
    "c1_prose_think_on": 76.9,
    "c1_code_think_on": 61.38,
-   "c8_prose_think_on_total": 364.38,
-   "c8_code_think_on_total": 283.78,
+   "c8_prose_think_on_total": 366.97,
+   "c8_code_think_on_total": 280.13,
    "prefill_4k": 1589.1,
    "prefill_32k": 1497.4,
    "prefill_128k": 1049.2,
@@ -597,6 +597,17 @@
    {
     "step": "mamba_cache_mode default / prefix caching off",
     "c16": "noise; still 10 of 16 running",
+    "kept": false
+   },
+   {
+    "step": "DPAS MB=24 and MB=40/48 blocks",
+    "linears_m40_ms": "61.9 -> 58.5",
+    "c16_code_think": "279.4 -> 294.6",
+    "kept": true
+   },
+   {
+    "step": "draft vocab 256/384 (vs 512)",
+    "c1_prose": "73.5 / 76.7 vs 76.9",
     "kept": false
    }
   ],

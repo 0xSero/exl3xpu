@@ -26,8 +26,8 @@ cap, 60-90 s sustained windows (`bench/sweep.py`); raw rows in `bench/results/20
 | 1 | 76.9 | 61.4 |
 | 2 | 139.8 | 117.2 |
 | 4 | 245.7 | 199.4 |
-| 8 | 364.4 | 283.8 |
-| 16 | 343.3 | 279.4 |
+| 8 | 367.0 | 280.1 |
+| 16 | 349.1 | 294.6 |
 
 Cold prefill, one request: 4K **1589**, 32K **1497**, 128K **1049**, 254K **763** tok/s.
 
