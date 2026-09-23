@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
-logger = init_logger(__name__)
+logger = init_logger("vllm.exl3xpu")
 
 # vLLM fused module -> checkpoint constituents
 FUSED = {
@@ -242,11 +242,20 @@ class Exl3LinearMethod(LinearMethodBase):
         elif hasattr(layer, "mul1"):
             cb = 2
         layer.exl3_cb = cb
+        # decide the backend once, outside any traced code: the all-C++ op when the ESIMD library has it
+        from . import ops
+        E = ops._get_esimd()
+        layer.exl3_cpp = bool(E) and hasattr(E, "linear") and bool(E.exl3_supported(layer.exl3_K, cb))
 
     def apply(self, layer, x, bias=None):
-        from .ops import exl3_linear
-        y = exl3_linear(x, layer.trellis, layer.suh, layer.svh, layer.exl3_shard_of_nb,
-                        layer.exl3_bounds, layer.exl3_K, layer.exl3_cb)
+        from . import ops
+        if layer.exl3_cpp:
+            y = torch.ops.exl3xpu_C.linear(x, layer.trellis, layer.suh, layer.svh, layer.exl3_shard_of_nb,
+                                           layer.exl3_bounds, layer.exl3_K, layer.exl3_cb,
+                                           ops.SMALL_M_MAX, ops.RECON_SLICE_N)
+        else:
+            y = ops._exl3_linear_py(x, layer.trellis, layer.suh, layer.svh, layer.exl3_shard_of_nb,
+                                    layer.exl3_bounds, layer.exl3_K, layer.exl3_cb)
         if bias is not None:
             y = y + bias
         return y
@@ -295,9 +304,9 @@ def _patch_mtp_draft_logits():
         d = getattr(lm, "exl3_draft", None)
         if d is None:
             return orig(self, hidden_states, spec_step_idx)
-        from .ops import exl3_linear
-        sub = exl3_linear(hidden_states, d["trellis"], lm.suh, d["svh"], d["shard"], d["bounds"],
-                          lm.exl3_K, lm.exl3_cb)
+        from . import ops
+        sub = torch.ops.exl3xpu_C.linear(hidden_states, d["trellis"], lm.suh, d["svh"], d["shard"], d["bounds"],
+                                         lm.exl3_K, lm.exl3_cb, ops.SMALL_M_MAX, ops.RECON_SLICE_N)
         logits = hidden_states.new_full((hidden_states.shape[0], lm.svh.shape[0]), float("-inf"))
         logits.index_copy_(1, d["idx"], sub)
         return logits[:, : self.config.vocab_size]
@@ -310,4 +319,7 @@ def register():
     """vllm.general_plugins entry point (runs in every vLLM process)."""
     if os.environ.get("EXL3_DRAFT_VOCAB"):
         _patch_mtp_draft_logits()
+    if os.environ.get("EXL3_VLLM_PATCHES", "1") != "0":
+        from . import vllm_patches
+        vllm_patches.apply_all()
     return None

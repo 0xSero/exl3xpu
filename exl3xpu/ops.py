@@ -23,9 +23,15 @@ def _get_esimd():
         try:
             torch.ops.load_library(os.environ.get("EXL3_LIB") or os.path.join(os.path.dirname(__file__), "_C.so"))
             _esimd = torch.ops.exl3xpu_C
+            if hasattr(_esimd, "linear"):
+                # symbolic-shape-aware fake impl (a C++ Meta kernel would specialise the token dim)
+                @torch.library.register_fake("exl3xpu_C::linear")
+                def _linear_fake(x, trellis, suh, svh, shard_of_nb, group_bounds, K, cb, small_m_max, slice_n):
+                    return x.new_empty((*x.shape[:-1], svh.shape[0]))
         except Exception as e:  # noqa
-            import logging
-            logging.getLogger(__name__).warning("exl3xpu: ESIMD ops unavailable (%s), using Triton", e)
+            if _backend != "triton":
+                # never degrade silently to the ~5x slower Triton path; opt in with EXL3_BACKEND=triton
+                raise RuntimeError(f"exl3xpu: failed to load the ESIMD op library: {e}") from e
             _esimd = False
     return _esimd
 
@@ -54,7 +60,7 @@ def exl3_linear_impl(x: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, 
     if M == 0:
         return out.view(*shape[:-1], n)
 
-    esimd = _get_esimd() if _backend in ("auto", "esimd") else False
+    esimd = _get_esimd() if _backend != "triton" else False
 
     if M <= SMALL_M_MAX:
         if esimd and esimd.exl3_supported(K, cb):
@@ -91,11 +97,19 @@ def exl3_linear_impl(x: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, 
 
 
 @torch.library.custom_op("exl3xpu::linear", mutates_args=())
-def exl3_linear(x: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, svh: torch.Tensor,
-                shard_of_nb: torch.Tensor, group_bounds: list[int], K: int, cb: int) -> torch.Tensor:
+def _exl3_linear_py(x: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, svh: torch.Tensor,
+                    shard_of_nb: torch.Tensor, group_bounds: list[int], K: int, cb: int) -> torch.Tensor:
     return exl3_linear_impl(x, trellis, suh, svh, shard_of_nb, group_bounds, K, cb)
 
 
-@exl3_linear.register_fake
+@_exl3_linear_py.register_fake
 def _(x, trellis, suh, svh, shard_of_nb, group_bounds, K, cb):
     return x.new_empty((*x.shape[:-1], svh.shape[0]))
+
+
+def exl3_linear(x, trellis, suh, svh, shard_of_nb, group_bounds, K, cb):
+    """EXL3 linear. Uses the all-C++ op (no Python per call) when the ESIMD library supports K/cb."""
+    esimd = _get_esimd() if _backend != "triton" else False
+    if esimd and hasattr(esimd, "linear") and esimd.exl3_supported(K, cb):
+        return esimd.linear(x, trellis, suh, svh, shard_of_nb, group_bounds, K, cb, SMALL_M_MAX, RECON_SLICE_N)
+    return _exl3_linear_py(x, trellis, suh, svh, shard_of_nb, group_bounds, K, cb)

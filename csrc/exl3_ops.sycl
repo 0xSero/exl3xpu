@@ -67,7 +67,10 @@ template <int K, int CB>
 static bool dispatch_dpas(int MB, const at::Tensor& xh, const at::Tensor& tr, const at::Tensor& shard,
                           at::Tensor& part, int M, int Kdim, int N, int P, int rps, sycl::queue& q) {
     switch (MB) {
-        case 8:  launch_dpas<K, CB, 8, 4>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+#ifndef EXL3_DPAS8_NT
+#define EXL3_DPAS8_NT 4
+#endif
+        case 8:  launch_dpas<K, CB, 8, EXL3_DPAS8_NT>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
         case 16: launch_dpas<K, CB, 16, 4>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
         case 32: launch_dpas<K, CB, 32, 2>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
         case 64: launch_dpas<K, CB, 64, 1>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
@@ -75,7 +78,7 @@ static bool dispatch_dpas(int MB, const at::Tensor& xh, const at::Tensor& tr, co
     return false;
 }
 
-static int dpas_nt(int MB) { return MB <= 16 ? 4 : (MB == 32 ? 2 : 1); }
+static int dpas_nt(int MB) { return MB == 8 ? EXL3_DPAS8_NT : (MB <= 16 ? 4 : (MB == 32 ? 2 : 1)); }
 static int g_vec_max_m = 2;   // vector kernel for M<=2, DPAS (flat cost up to M=8) above
 
 static int g_target_threads = 4096;
@@ -217,6 +220,63 @@ void exl3_had_out_h(at::Tensor y, at::Tensor svh, at::Tensor out) {
     else TORCH_CHECK(false, "out dtype");
 }
 
+bool exl3_supported(int64_t K, int64_t cb);
+
+// ------------------------------------------------------------------------------------------------
+// The whole EXL3 linear as one C++ op (no Python on the per-call path).
+//   M <= small_m_max : fused decode-in-GEMM (vector / DPAS)
+//   otherwise        : row-major input Hadamard -> reconstruct W_inner slices -> oneDNN GEMM -> output Hadamard
+
+static at::Tensor& weight_scratch(const at::Device& dev, int64_t numel) {
+    static std::vector<at::Tensor> bufs(16);
+    auto& b = bufs.at(dev.index());
+    if (!b.defined() || b.numel() < numel)
+        b = at::empty({numel}, at::TensorOptions().dtype(at::kHalf).device(dev));
+    return b;
+}
+
+at::Tensor exl3_linear(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Tensor svh, at::Tensor shard_of_nb,
+                       std::vector<int64_t> group_bounds, int64_t K, int64_t cb, int64_t small_m_max,
+                       int64_t slice_n) {
+    auto shape = x.sizes().vec();
+    int64_t k = shape.back();
+    int64_t n = svh.size(0);
+    auto x2 = x.reshape({-1, k});
+    if (!x2.is_contiguous()) x2 = x2.contiguous();
+    int64_t M = x2.size(0);
+    shape.back() = n;
+    auto out = at::empty({M, n}, x.options());
+    if (M == 0) return out.view(shape);
+    if (M <= small_m_max && exl3_supported(K, cb)) {
+        exl3_gemm_small(x2, trellis, suh, svh, shard_of_nb, out, K, cb);
+        return out.view(shape);
+    }
+    int64_t S = suh.size(0);
+    auto xh = at::empty({S, M, k}, x.options().dtype(at::kHalf));
+    exl3_had_in_rm(x2, suh, xh);
+    auto y = at::empty({M, n}, x.options().dtype(at::kHalf));
+    for (size_t g = 0; g + 1 < group_bounds.size(); ++g) {
+        int64_t g0 = group_bounds[g], g1 = group_bounds[g + 1];
+        for (int64_t n0 = g0; n0 < g1; n0 += slice_n) {
+            int64_t n1 = std::min(n0 + slice_n, g1);
+            auto w = weight_scratch(x.device(), k * (n1 - n0)).narrow(0, 0, k * (n1 - n0)).view({k, n1 - n0});
+            exl3_reconstruct(trellis, w, n0, K, cb);
+            auto yslice = y.narrow(1, n0, n1 - n0);
+            at::matmul_out(yslice, xh[g], w);
+        }
+    }
+    exl3_had_out_h(y, svh, out);
+    return out.view(shape);
+}
+
+at::Tensor exl3_linear_meta(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Tensor svh, at::Tensor shard_of_nb,
+                            std::vector<int64_t> group_bounds, int64_t K, int64_t cb, int64_t small_m_max,
+                            int64_t slice_n) {
+    auto shape = x.sizes().vec();
+    shape.back() = svh.size(0);
+    return at::empty(shape, x.options());
+}
+
 bool exl3_supported(int64_t K, int64_t cb) {
     if (cb == 2 && (K == 4 || K == 6)) return true;
 #ifdef EXL3_ALL_CODEBOOKS
@@ -230,6 +290,8 @@ void exl3_set_target_threads(int64_t n) { g_target_threads = (int)n; }
 void exl3_set_vec_max_m(int64_t n) { g_vec_max_m = (int)n; }
 
 TORCH_LIBRARY(exl3xpu_C, m) {
+    m.def("linear(Tensor x, Tensor trellis, Tensor suh, Tensor svh, Tensor shard_of_nb, int[] group_bounds, int K, int cb, int small_m_max, int slice_n) -> Tensor");
+    m.impl("linear", torch::kXPU, &exl3_linear);
     m.def("exl3_gemm_small(Tensor x, Tensor trellis, Tensor suh, Tensor svh, Tensor shard_of_nb, Tensor(a!) out, int K, int cb) -> ()");
     m.impl("exl3_gemm_small", torch::kXPU, &exl3_gemm_small);
     m.def("exl3_supported(int K, int cb) -> bool", &exl3_supported);

@@ -143,9 +143,28 @@ async def stream_one(session, url, model, prompt, max_tokens, temperature, think
     return rec
 
 
+async def spec_counters(base):
+    """(accepted draft tokens, drafts) from vLLM's Prometheus metrics, or None."""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+            async with s.get(base + "/metrics") as r:
+                txt = await r.text()
+    except Exception:
+        return None
+    acc = drafts = None
+    for line in txt.splitlines():
+        if line.startswith("vllm:spec_decode_num_accepted_tokens_total"):
+            acc = float(line.split()[-1])
+        elif line.startswith("vllm:spec_decode_num_drafts_total"):
+            drafts = float(line.split()[-1])
+    return (acc, drafts) if acc is not None and drafts is not None else None
+
+
 async def decode_cell(args, C, ctx, cls):
     url = f"{args.base}/v1/chat/completions"
-    rnd = random.Random(hash((C, ctx, cls, time.time())))
+    # deterministic prompt sequence per cell (same text across variants/boots, still cold: server restarts)
+    rnd = random.Random(f"{args.seed}-{C}-{ctx}-{cls}")
+    m0 = await spec_counters(args.base)
     recs = []
     t0 = time.time()
     t_stop = t0 + args.warm + args.window
@@ -189,6 +208,10 @@ async def decode_cell(args, C, ctx, cls):
             if r.get("ok"):
                 outs.append(r.get("completion_tokens") or len(ts))
     busy = GpuSampler.busy(g_a, g_b) if g_a and sampler.devs else []
+    m1 = await spec_counters(args.base)
+    accept_len = None
+    if m0 and m1 and m1[1] > m0[1]:
+        accept_len = round(1 + (m1[0] - m0[0]) / (m1[1] - m0[1]), 3)
     flags = []
     if fails:
         flags.append("REQ_FAIL")
@@ -202,6 +225,7 @@ async def decode_cell(args, C, ctx, cls):
                ttft_ms_p50=round(1000 * statistics.median(ttfts)) if ttfts else None,
                output_tokens_mean=round(statistics.mean(outs)) if outs else None,
                samples=len(per_stream), window_seconds=args.window, gpu_busy_pct=busy, flags=flags,
+               spec_accept_len=accept_len,
                label=args.label)
     return row
 
@@ -259,6 +283,7 @@ async def main():
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--thinking", action="store_true")
     ap.add_argument("--label", default="")
+    ap.add_argument("--seed", default="panel-v1", help="prompt-sequence seed (same across variants)")
     ap.add_argument("--out", default="bench/results.jsonl")
     ap.add_argument("--skip-decode", action="store_true")
     ap.add_argument("--skip-prefill", action="store_true")
@@ -280,12 +305,13 @@ async def main():
                     row = await decode_cell(args, C, ctx, cls)
                     rows.append(row); print(json.dumps(row), flush=True)
                     open(args.out, "a").write(json.dumps(row) + "\n")
-    print("\n%-8s %4s %6s %-6s %12s %12s %12s %9s %s" % ("kind", "C", "ctx", "class", "tok/s total", "tok/min", "per-stream", "ttft_ms", "flags"))
+    print("\n%-8s %4s %6s %-6s %12s %12s %12s %9s %7s %s" % ("kind", "C", "ctx", "class", "tok/s total", "tok/min", "per-stream", "ttft_ms", "accept", "flags"))
     for r in rows:
         tot = r.get("decode_tok_s_total", r.get("prefill_tok_s_total"))
         tpm = r.get("decode_tok_min_total", r.get("prefill_tok_min_total"))
-        print("%-8s %4d %6d %-6s %12s %12s %12s %9s %s" % (r["kind"], r["concurrency"], r["context_tokens"],
-              r.get("content_class", "-"), tot, tpm, r.get("decode_tok_s_per_stream", "-"), r.get("ttft_ms_p50"), ",".join(r["flags"])))
+        print("%-8s %4d %6d %-6s %12s %12s %12s %9s %7s %s" % (r["kind"], r["concurrency"], r["context_tokens"],
+              r.get("content_class", "-"), tot, tpm, r.get("decode_tok_s_per_stream", "-"), r.get("ttft_ms_p50"),
+              r.get("spec_accept_len", "-"), ",".join(r["flags"])))
 
 
 if __name__ == "__main__":

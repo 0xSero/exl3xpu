@@ -348,6 +348,32 @@ struct DpasKernel {
         }
     }
 
+    // K=4 fast path: build the VNNI B operand with contiguous 32-lane writes and no scatter moves.
+    // Word w (0..31) holds t = 8w + j; with w = m + 4c' and j = q0 + 2q1 + 4h the VNNI index of t is
+    // 128q1 + 32m + 2c' + 16h + q0. Lanes L = q0 + 2c' + 16h for fixed (q1, m) are therefore one
+    // contiguous 32-half chunk at 32m + 128q1. Each lane reads word m + 4c' (a region broadcast) and
+    // shifts by a per-lane amount: state = (prev << 4 + 4j) | (cur >> 28 - 4j), low 16 bits.
+    static ESIMD_INLINE void build_k4(simd<uint32_t, W>& dw, simd<uint32_t, W>& prev, simd<fp16, 256>& Bv) {
+        simd<uint32_t, 32> lane(0, 1);
+        simd<uint32_t, 32> q0 = lane & 1u, h = lane >> 4;
+#pragma unroll
+        for (int q1 = 0; q1 < 2; ++q1) {
+            simd<uint32_t, 32> j = q0 + 2u * q1 + 4u * h;
+            simd<uint32_t, 32> sr = 28u - 4u * j;          // right shift of the current word (0..28)
+            simd<uint32_t, 32> sl = 2u + 4u * j;           // prev << 2 << sl  ==  prev << (4 + 4j), 32 -> 0
+#pragma unroll
+            for (int m = 0; m < 4; ++m) {
+                simd<uint32_t, 32> cw, pw;
+                cw.template select<16, 1>(0) = dw.template replicate_vs_w_hs<8, 4, 2, 0>(m);
+                cw.template select<16, 1>(16) = cw.template select<16, 1>(0);
+                pw.template select<16, 1>(0) = prev.template replicate_vs_w_hs<8, 4, 2, 0>(m);
+                pw.template select<16, 1>(16) = pw.template select<16, 1>(0);
+                simd<uint32_t, 32> st = (((pw << 2u) << sl) | (cw >> sr)) & 0xFFFFu;
+                Bv.template select<32, 1>(32 * m + 128 * q1) = decode_cb_h<CB, 32>(st);
+            }
+        }
+    }
+
     void operator()(sycl::nd_item<1> it) const SYCL_ESIMD_KERNEL {
         int id = it.get_global_id(0);
         int strip = id % n_strips;
@@ -376,7 +402,8 @@ struct DpasKernel {
                 simd<uint32_t, W> dw = words.template select<W, 1>(j * W);
                 simd<uint32_t, W> dwprev = prevs.template select<W, 1>(j * W);
                 simd<fp16, 256> Bv;
-                build<0>(dw, dwprev, Bv);
+                if constexpr (K == 4) build_k4(dw, dwprev, Bv);
+                else build<0>(dw, dwprev, Bv);
 #pragma unroll
                 for (int rb = 0; rb < MB / 8; ++rb) {
                     auto c = acc.template select<128, 1>((j * MB + rb * 8) * 16);
