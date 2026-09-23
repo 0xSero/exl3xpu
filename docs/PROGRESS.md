@@ -186,3 +186,5 @@ T1 now passes on both classes (code 56.9 >= 50).
 All linears (graph-captured, mean of 2 alternating reps), base -> prev-from-registers: M=1 32.5 -> 29.2,
 M=4 35.4 -> 35.2, M=16 39.0 -> 37.8, M=64 76.8 -> 67.7 ms. Gate A1 PASS. Double-buffered trellis words in
 DpasKernel (EXL3_DPAS_PREFETCH): M=16 39.0 -> 86.4 ms (register spill), M=64 76.8 -> 79.2: rejected.
+Served (B70 #1, think off, agg tok/s, full-v2 -> prev-from-regs): C1 prose 53.9 -> 53.7, code 75.3 -> 75.9;
+C8 prose 253.8 -> 265.4, code 371.4 -> 390.0; C16 prose 241.5 -> 262.7, code 349.0 -> 374.5. Kept.
