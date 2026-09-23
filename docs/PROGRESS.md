@@ -202,3 +202,6 @@ Decode-cost probe (EXL3_DEBUG_NODECODE / NOSTATE builds): inconclusive, codegen 
 94.9 ms with decode removed); not a usable bound.
 DPAS MB=8 tiles/thread (EXL3_DPAS8_NT), all linears, 2 reps: NT=4 (current) M=4 31.7-31.8, M=8 33.1-33.2 ms;
 NT=2 41.9-42.1 / 42.7-43.1; NT=8 49.9-50.0 / 51.4-52.3. Rejected (NT=4 stays).
+Async scheduling at C8/C16 (think off, confirmed enabled in the engine log): C8 prose 268.3 -> 268.9, code
+389.1 -> 389.9; C16 prose 265.9 -> 261.1, code 378.0 -> 372.1. No gain: rejected. The ~48 ms/step gap vs the
+eager-mode GPU sum is not overlappable host work; next C16 step is a graph-mode profile to re-derive it.
