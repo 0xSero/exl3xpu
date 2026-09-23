@@ -258,3 +258,9 @@ Full (unpruned) MTP draft head after the K=6 planar lm_head (thinking on, agg): 
 Draft vocab blocks after the planar lm_head (thinking on, agg C1 prose / C1 code / C4 prose / C4 code):
 256: 73.5 / 58.9 / 242.2 / 187.1 (accept 2.75/2.29); 384: 76.7 / 59.2 / 243.6 / 197.2; 512: 76.9 / 61.4 / 245.7 /
 199.4; full: 73.8 / 59.6 / 231.4 / 183.3. 512 stays.
+
+### C1 thinking-on graph-mode profile (planar build, 145 steps, ~41 ms/step)
+Outside the captured target graph, per step: target lm_head (M=4) 1.78 ms, draft lm_head 3 x 0.49 ms, draft-layer
+linears ~1.3 ms, FA2/argmax/reduce ~0.8 ms: ~5.7 ms GPU. The graph (target linears ~30 ms + attention/GDN) is the
+rest; ~146 small aten::copy_ per step cost ~6 ms CPU but overlap with GPU work. C1 is GPU-bound on the M=4
+target linears (31.7 ms, 415 GB/s; decode-bound: MB=4 and vector-kernel variants measured no better).
