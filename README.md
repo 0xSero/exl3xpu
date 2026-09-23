@@ -5,23 +5,32 @@ Battlemage GPUs, as a vLLM plugin. Native ESIMD kernels decode the trellis bit-e
 on the Xe2 vector and XMX units; vLLM supplies scheduling, paged KV cache, the GDN/attention kernels and the
 OpenAI API.
 
-Tested on 2x Intel Arc Pro B70 (BMG-G31, 32 GB), vLLM 0.26.1 XPU (`intel/llm-scaler-vllm:0.26.0-b2`).
+Tested on Intel Arc Pro B70 (BMG-G31, 32 GB), vLLM 0.26.1 XPU
+(`intel/llm-scaler-vllm:0.26.0-b2@sha256:52218ad85513ab6686d4c090c83c2bd8c5b02423c63aa4dabd41837fe641fe3b`),
+host kernel 7.1.8 (xe), compute-runtime 26.31.39395.13, IGC 2.40.13, Level Zero loader 1.32.0.
 
 ## Results: Qwen3.8-27B EXL3 4.00bpw, one B70
 
-Cold unique prompts, sustained 40 s windows, no output cap (`bench/sweep.py`). Full rows:
-[`models/qwen3.8-27b-exl3-4.00bpw/recipe.json`](models/qwen3.8-27b-exl3-4.00bpw/recipe.json).
+Config [`models/qwen3.8-27b-exl3-4.00bpw/model.yaml`](models/qwen3.8-27b-exl3-4.00bpw/model.yaml):
+MTP speculative decoding k=3 (the EXL3 MTP head shipped in the checkpoint, draft lm_head pruned to 512 vocab
+blocks), fp8 KV cache (267,761 tokens, 8.2 GiB), max context 262,144, 16 sequences, image (4/prompt) and
+video (1/prompt) input. Model revision `113cf7ab958054860e43fb7f3063b1af19171095` (branch `4.00bpw`).
 
-| cell | exl3xpu (EXL3 4.0bpw) | llama.cpp SYCL (Q4_K_M, tuned image) |
-|---|---|---|
-| decode C=1, tok/s | **28.6** | 25.0 |
-| decode C=8, aggregate tok/s | **152** | 57 |
-| decode C=16, aggregate | **239** | 56 |
-| decode C=32, aggregate | **391** | – (64 slots: device lost) |
-| decode C=64, aggregate | **411** (24.7K tok/min) | – |
-| prefill 4K cold, tok/s | **1019** | 999 |
+Decode, aggregate tok/s (per-stream in brackets). Cold unique tokenizer-sized prompts, greedy, no output
+cap, 60-90 s sustained windows (`bench/sweep.py`); raw rows in `bench/results/2026-09-23.jsonl`.
 
-The table is one card. `--dp` runs a second replica on the second card (aggregate sweep pending).
+| C | prose, think off | code, think off | prose, think on | code, think on |
+|---|---|---|---|---|
+| 1 | 47.2 (47.0) | 66.7 (66.3) | 61.4 (56.6) | 48.5 (47.7) |
+| 2 | 83.2 (42.7) | 119.8 (60.0) | 110.8 (54.1) | 82.7 (41.6) |
+| 4 | 138.6 (35.5) | 200.4 (50.0) | 175.6 (42.5) | 144.1 (35.0) |
+| 8 | 238.4 | 344.1 | 318.1 | 239.8 |
+| 16 | 233.1 | 332.5 | 294.7 | 240.2 (23.3) |
+
+Cold prefill, one request: 4K **1589**, 32K **1497**, 128K **1049**, 254K **763** tok/s.
+
+Same card, tuned llama.cpp SYCL Q4_K_M (`qwen38-q4km-arcb70-llamacpp-tp1`): C1 25.0, C8 56.8, C16 56.0
+aggregate; prefill 4K 999, 32K 629 tok/s.
 
 ## Correctness
 
@@ -79,5 +88,7 @@ use data parallel.
 
 ## Status
 
-Candidate. Pending: speculative decoding, DP=2 sweep, prefill kernels, long-context cells, repeated waves,
-Gate A3. See `docs/PROGRESS.md`.
+Candidate recipe (`models/qwen3.8-27b-exl3-4.00bpw/recipe.json`). Weights bit-exact vs exllamav3 on every
+kernel path; logits vs exllamav3 on a 3090: top-1 99.63%, KL 9.8e-5. Vision, video and a 128K needle test
+pass. Open items: C16 does not scale past C8, 256K prefill is bound by fp8 attention, repeated waves. Log in
+`docs/PROGRESS.md`.
