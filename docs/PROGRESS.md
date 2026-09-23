@@ -295,3 +295,6 @@ Timing probes (wrong-result debug builds, all linears, 2 reps):
 - EXL3_BV_ALL (separate B registers per tile so decode j+1 need not wait on dpas j reading shared B): no change
   (M=32 46.3 -> 45.5-46.6, M=64 67.6 -> 67.3-68.1). Rejected. The SLM shared-decode redesign is also off: its
   per-thread operand traffic would be ~4x the current A traffic.
+- MAXMB 32 / 16 (split large M into more blocks, re-decoding each tile per block), all linears 2 reps:
+  M=32 46.2-46.5 (64) / 46.4-46.6 (32) / 71.4-72.0 (16); M=48 64.4 / 87.3 / 92.0; M=64 67.8-68.2 / 93.1-93.7 /
+  140.3-141.1 ms. Current max block 64 stays.
