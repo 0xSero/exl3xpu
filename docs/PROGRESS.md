@@ -253,3 +253,5 @@ Fused single-kernel linear (exl3_set_fused 1) re-tested on the current build: M=
 Per-layer split-K target at M=1 (TARGET 512/1024/2048/4096): 1024 is best for every layer type (out_proj 344/367/
 340/284 GB/s, o_proj 339/360/337/279, down_proj 391/446/350/371). The small projections' ~360 GB/s is fixed
 per-call overhead (Hadamard kernels + gaps, ~5-8 us on a ~26 us GEMV), worth ~1 ms/step in total.
+Full (unpruned) MTP draft head after the K=6 planar lm_head (thinking on, agg): C1 prose 76.9 -> 73.8, code
+61.4 -> 59.6; C4 245.7 -> 231.4, 199.4 -> 183.3; acceptance ~unchanged. Pruned 512-block head stays.
