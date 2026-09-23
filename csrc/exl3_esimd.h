@@ -43,7 +43,16 @@ ESIMD_INLINE simd<fp16, N> decode_cb_h(simd<uint32_t, N> st) {
 #endif
     // Bit-exact with exllamav3 decode_3inst<cb> (CUDA): same integer ops, same fp16 roundings.
     if constexpr (CB == 2) {  // mul1
+#ifdef EXL3_MUL16
+        // st < 2^16: st * 0x83DCD12D mod 2^32 == st*0xD12D + ((st*0x83DC) mod 2^16) << 16, i.e. two
+        // full-rate 16x16 multiplies instead of one reduced-rate 32x32 multiply (same bits).
+        simd<uint16_t, N> s16 = convert<uint16_t>(st);
+        simd<uint32_t, N> lo = s16 * simd<uint16_t, N>(0xD12D);
+        simd<uint16_t, N> hi = s16 * simd<uint16_t, N>(0x83DC);
+        simd<uint32_t, N> x = lo + (convert<uint32_t>(hi) << 16);
+#else
         simd<uint32_t, N> x = st * 0x83DCD12Du;
+#endif
         // 0x6400 + byte sum in one instruction; its low 16 bits ARE fp16(1024 + byte sum) (< 2048)
         simd<uint32_t, N> bs = dp4a<uint32_t, uint32_t, uint32_t, uint32_t, N>(
             simd<uint32_t, N>(0x6400u), x, simd<uint32_t, N>(0x01010101u));

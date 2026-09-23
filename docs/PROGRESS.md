@@ -210,3 +210,5 @@ FULL_AND_PIECEWISE (drafter graphs), sizes [1,2,4,8,16,32,48,64]: UR OUT_OF_RESO
 DPAS MB=4 (repeat count 4, opt-in EXL3_DPAS_MB4): outputs bitwise identical to MB=8 (24 layer/M cases), all
 linears 2 reps: M=3 31.9-32.0 -> 31.5-32.6, M=4 32.6-32.8 -> 32.0-32.1 ms (NT=4; NT=8 no better). Within noise:
 M=4 is decode/memory-bound, not DPAS-bound. Rejected (left opt-in).
+mul1 codebook as two 16x16 multiplies (EXL3_MUL16): Gate A1 PASS but slower everywhere (2 reps): M=1 29.4 ->
+34.4, M=4 32.9 -> 39.4, M=16 36-38 -> 43.4, M=64 69.3 -> 78.0 ms. Rejected (left opt-in).
