@@ -255,3 +255,6 @@ Per-layer split-K target at M=1 (TARGET 512/1024/2048/4096): 1024 is best for ev
 per-call overhead (Hadamard kernels + gaps, ~5-8 us on a ~26 us GEMV), worth ~1 ms/step in total.
 Full (unpruned) MTP draft head after the K=6 planar lm_head (thinking on, agg): C1 prose 76.9 -> 73.8, code
 61.4 -> 59.6; C4 245.7 -> 231.4, 199.4 -> 183.3; acceptance ~unchanged. Pruned 512-block head stays.
+Draft vocab blocks after the planar lm_head (thinking on, agg C1 prose / C1 code / C4 prose / C4 code):
+256: 73.5 / 58.9 / 242.2 / 187.1 (accept 2.75/2.29); 384: 76.7 / 59.2 / 243.6 / 197.2; 512: 76.9 / 61.4 / 245.7 /
+199.4; full: 73.8 / 59.6 / 231.4 / 183.3. 512 stays.
