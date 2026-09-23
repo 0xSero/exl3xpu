@@ -116,3 +116,21 @@ Harness fix: prefill prompts are built (tokenizer-sized) before the clock starts
 | 32K | 1363 | 1531 | ok |
 | 128K | 760 | 1059 | ok |
 | 254K | 508 | 763 | open: needs an attention kernel ~1.6x faster than XPU FA2 at head_dim 256 |
+
+### Gate status (2026-09-23, one B70, MTP k=3 + pruned draft head, fp8 KV 256K, vision)
+| gate | result |
+|---|---|
+| T1 C1 prose >= 50 tok/s | 47.6 (panel acceptance 2.4); code 68.0 |
+| T2 prefill >= 1000 | 4K 1612, 32K 1531, 128K 1059 pass; 254K 763 |
+| T3 256K on one card | pass (KV 265,888 tokens, 1.02x) + needle 3/3 at 128K |
+| T4 C2 / C8 | prose 85 / 239, code 120 / 349 aggregate |
+| T5 vision | pass |
+| T6 MTP identity | 5/8 exact; divergence at a 0.016-nat top-2 tie (numerics, not a bug) |
+| A1 bit-exact weights | pass |
+| A3 logits vs exllamav3 (3090) | pass: top-1 99.63%, KL 9.8e-5 nats over 16,320 positions |
+
+Rejected this round: TRITON_ATTN (43 tok/s at 32K); 256-GRF DPAS (NT=4 44.4 / NT=8 53.7 vs 35.1 ms);
+work-group 4/16/32 and split-K 2048 (all worse than local 8 / 1024).
+Bounds: XPU FA2 = 69 TFLOPS (fp16) at head_dim 256, the only FA version shipped. 254K prefill at 69 TFLOPS
+attention + ~130 TFLOPS GEMMs caps near 800 tok/s; even a 100 TFLOPS attention kernel gives ~960.
+GPU runs 2600 MHz of 2800 under decode (~47 W card power; 230 W cap; power profile 'base').
