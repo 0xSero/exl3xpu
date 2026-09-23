@@ -267,3 +267,15 @@ target linears (31.7 ms, 415 GB/s; decode-bound: MB=4 and vector-kernel variants
 LSC L1/L2 prefetch of trellis words EXL3_PF_DIST rows ahead (GEMV + DPAS, opt-in EXL3_L1_PF), all linears 2 reps:
 dist 1: M=1 27.1-27.2, M=4 30.6-31.7, M=16 34.2-35.1; dist 2: 27.6-27.7 / 30.6-31.4 / 34.6-35.2; dist 4: 28.6 /
 31.2-31.9 / 35.2-36.4; current: 27.2 / 31.3-31.5 / 34.6-34.7 ms. Noise or worse: rejected (left opt-in).
+
+### ISA read of the K=4 DPAS loop; Gate A1 coverage fix (2026-09-23)
+IGC dump of DpasKernel<4,2,8,4>: ~300 instructions per K-row for 32 decode groups of 32 values, i.e. ~9 SIMD32
+per group: shl(:w) / shr(:ud) / or(:w) / mul (single native d x uw) / dp4a / mov (fp16 view copy) / mad(:hf), plus
+~2 SIMD32-equivalent moves duplicating the 16-lane word region into both 32-lane halves. Decode is already
+near the integer-ALU roofline (~25 ms of ALU work per step vs 27-31 ms measured for M<=4).
+- EXL3_DECODE_INLINE (strided fp16 view straight into the mad): no change (27.2 / 31.4 ms), IGC still copies.
+- EXL3_K4_HALVES (two 16-lane halves reading the region directly): timed -4% at M<=16, but its OUTPUTS WERE
+  WRONG (abs err up to 120 at M=3..8). Rejected.
+- Gate A1 only exercised vector M=4 and DPAS M=64, so the production MB=8/16/32 DPAS and vector M=1/2 paths were
+  untested at the weight level. tests/test_bitexact_xpu.py now also checks vector M=1/2 and DPAS M=3/8/16/32 on a
+  128-row sample per tensor; it catches the halves bug, and the production kernel passes (GATE_A1_PASS, 401 tensors).

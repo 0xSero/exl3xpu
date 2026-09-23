@@ -57,9 +57,15 @@ ESIMD_INLINE simd<fp16, N> decode_cb_h(simd<uint32_t, N> st) {
         // 0x6400 + byte sum in one instruction; its low 16 bits ARE fp16(1024 + byte sum) (< 2048)
         simd<uint32_t, N> bs = dp4a<uint32_t, uint32_t, uint32_t, uint32_t, N>(
             simd<uint32_t, N>(0x6400u), x, simd<uint32_t, N>(0x01010101u));
+#ifdef EXL3_DECODE_INLINE
+        // strided fp16 view straight into the mad (<2;1,0>:hf is a legal source region; no copy)
+        return bs.template bit_cast_view<fp16>().template select<N, 2>(0) * fp16(0.00676727294921875f)
+               + fp16(-10.3828125f);
+#else
         simd<fp16, N> h = bs.template bit_cast_view<fp16>().template select<N, 2>(0);
         // __hfma(h, 0x1eee, 0xc931): single fp16 rounding, bit-exact with exllamav3
         return h * fp16(0.00676727294921875f) + fp16(-10.3828125f);
+#endif
     } else {
         simd<uint32_t, N> x;
         if constexpr (CB == 1) x = st * 0xCBAC1FEDu;
@@ -512,7 +518,36 @@ struct DpasKernel {
     // 128q1 + 32m + 2c' + 16h + q0. Lanes L = q0 + 2c' + 16h for fixed (q1, m) are therefore one
     // contiguous 32-half chunk at 32m + 128q1. Each lane reads word m + 4c' (a region broadcast) and
     // shifts by a per-lane amount: state = (prev << 4 + 4j) | (cur >> 28 - 4j), low 16 bits.
+#ifndef EXL3_HALVES_MAXMB
+#define EXL3_HALVES_MAXMB 32
+#endif
     static ESIMD_INLINE void build_k4(simd<uint32_t, W>& dw, simd<uint32_t, W>& prev, simd<fp16, 256>& Bv) {
+#ifdef EXL3_K4_HALVES   // REJECTED: wrong DPAS B layout at MB<=32 (caught by extended Gate A1)
+      if constexpr (MB <= EXL3_HALVES_MAXMB) {
+        // Same values, as two 16-lane halves (h = 0, 1) that read the word region <4;2,0> directly instead of
+        // materialising a duplicated 32-lane copy of it: lane l = q0 + 2c' within a half, j = q0 + 2q1 + 4h.
+        // All linears: M=4 30.6 -> 29.4 ms, M=8 32.3 -> 31.0, M=16 34.7 -> 33.1-33.9; MB=64 regresses (+4%).
+        simd<uint32_t, 16> l16(0, 1);
+        simd<uint32_t, 16> q0h = l16 & 1u;
+        simd<uint32_t, W> prev2 = prev << 2u;
+#pragma unroll
+        for (int q1 = 0; q1 < 2; ++q1) {
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                simd<uint32_t, 16> j = q0h + (2u * q1 + 4u * h);
+                simd<uint32_t, 16> sr = 28u - 4u * j;
+                simd<uint32_t, 16> sl = 2u + 4u * j;
+#pragma unroll
+                for (int m = 0; m < 4; ++m) {
+                    simd<uint32_t, 16> st = ((prev2.template replicate_vs_w_hs<8, 4, 2, 0>(m) << sl)
+                                             | (dw.template replicate_vs_w_hs<8, 4, 2, 0>(m) >> sr)) & 0xFFFFu;
+                    Bv.template select<16, 1>(32 * m + 128 * q1 + 16 * h) = decode_cb_h<CB, 16>(st);
+                }
+            }
+        }
+      } else
+#endif
+      {
         simd<uint32_t, 32> lane(0, 1);
         simd<uint32_t, 32> q0 = lane & 1u, h = lane >> 4;
         simd<uint32_t, W> prev2 = prev << 2u;                // hoisted: one shift per tile, not per group
@@ -532,6 +567,7 @@ struct DpasKernel {
                 Bv.template select<32, 1>(32 * m + 128 * q1) = decode_cb_h<CB, 32>(st);
             }
         }
+      }
     }
 
     void operator()(sycl::nd_item<1> it) const SYCL_ESIMD_KERNEL {

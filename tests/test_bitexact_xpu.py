@@ -3,7 +3,7 @@ Gate A1: every XPU decode path is bit-exact with exllamav3.
 
 1. ESIMD reconstruct vs exl3xpu.ref (itself bit-exact vs exllamav3 CUDA, tests/oracle_cuda.py) for
    EVERY exl3 tensor in the checkpoint, all columns.
-2. GEMM paths (vector M<=4, DPAS M<=64): one-hot activation rows make each fp32 output an exact copy
+2. GEMM paths (vector M=1/2/4, DPAS M=3/8/16/32/64): one-hot activation rows make each fp32 output an exact copy
    of one decoded weight, so out[m, :] must equal W_ref[k_m, :] bit for bit. Full k coverage for one
    tensor of each shape class; sampled k rows for the rest.
 
@@ -64,9 +64,13 @@ for i, key in enumerate(keys):
             krows = list(range(k)) if (full and not quick) else random.Random(i).sample(range(k), 128)
             nn_ = w
             shard = torch.zeros(n // 128, dtype=torch.int32, device=dev)
-            for path, M in [(0, 4), (1, 64)]:
-                for c in range(0, len(krows), M):
-                    ks = krows[c:c + M]
+            # full k coverage on the two widest paths; every production block size (vector M=1/2, DPAS
+            # MB=8/16/32 incl. a partial block at M=3) on a 128-row sample
+            sample = krows if len(krows) <= 128 else random.Random(i + 1).sample(krows, 128)
+            for path, M, rows in [(0, 4, krows), (1, 64, krows), (0, 1, sample), (0, 2, sample), (1, 3, sample),
+                                  (1, 8, sample), (1, 16, sample), (1, 32, sample)]:
+                for c in range(0, len(rows), M):
+                    ks = rows[c:c + M]
                     Mi = len(ks)
                     xh = torch.zeros((1, k // 16, Mi, 16), dtype=torch.float16, device=dev)
                     for m, kk in enumerate(ks):
@@ -75,7 +79,7 @@ for i, key in enumerate(keys):
                     exp = wr[ks].float()
                     if not torch.equal(part, exp):
                         bad = (part != exp).sum().item()
-                        fails.append(f"{'vector' if path == 0 else 'dpas'} {key} rows {ks[:3]}...: {bad} mismatches")
+                        fails.append(f"{'vector' if path == 0 else 'dpas'} M={M} {key} rows {ks[:3]}...: {bad} mismatches")
                         break
     if i % 25 == 0 or i == len(keys) - 1:
         print(f"[{i + 1}/{len(keys)}] {key} K={K} {k}x{n}  elapsed {time.time() - t0:.0f}s  fails={len(fails)}", flush=True)
