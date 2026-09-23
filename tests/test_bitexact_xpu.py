@@ -68,7 +68,7 @@ for i, key in enumerate(keys):
             # MB=8/16/32 incl. a partial block at M=3) on a 128-row sample
             sample = krows if len(krows) <= 128 else random.Random(i + 1).sample(krows, 128)
             for path, M, rows in [(0, 4, krows), (1, 64, krows), (0, 1, sample), (0, 2, sample), (1, 3, sample),
-                                  (1, 8, sample), (1, 16, sample), (1, 24, sample), (1, 32, sample)]:
+                                  (1, 8, sample), (1, 16, sample), (1, 24, sample), (1, 32, sample), (1, 40, sample), (1, 48, sample)]:
                 for c in range(0, len(rows), M):
                     ks = rows[c:c + M]
                     Mi = len(ks)

@@ -26,6 +26,11 @@ static int g_local = 8;       // work-group size (threads) for the GEMV / DPAS l
 #ifndef EXL3_NO_DPAS_MB24
 #define EXL3_DPAS_MB24
 #endif
+// MB=40/48 blocks (256-GRF, NT=2, split-K target as MB=64) for 33..48 rows (C16 thinking-on runs ~10 streams =
+// ~40 rows): all linears M=33 59.7 -> 56.9, M=40 61.9 -> 58.5, M=48 64.3 -> 61.6 ms. Opt out: EXL3_NO_DPAS_MB48.
+#ifndef EXL3_NO_DPAS_MB48
+#define EXL3_DPAS_MB48
+#endif
 static int g_max_mb = 64;     // largest DPAS row block; M above it runs as several blocks
 void exl3_set_max_mb(int64_t n) { g_max_mb = (int)n; }
 void exl3_set_local(int64_t n) { g_local = (int)n; }
@@ -84,7 +89,7 @@ static void launch_dpas(const at::Tensor& xh, const at::Tensor& tr, const at::Te
 #elif defined(EXL3_DPAS32_LARGE_GRF)
     constexpr bool large = (MB >= 32);
 #else
-    constexpr bool large = (MB == 64);
+    constexpr bool large = (MB >= 40);
 #endif
     if constexpr (large) {
         // 256-register mode: room for the MB x 16 x NT accumulator without spills
@@ -123,6 +128,10 @@ static bool dispatch_dpas(int MB, const at::Tensor& xh, const at::Tensor& tr, co
 #define EXL3_DPAS32_NT 2
 #endif
         case 32: launch_dpas<K, CB, 32, EXL3_DPAS32_NT>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+#ifdef EXL3_DPAS_MB48
+        case 40: launch_dpas<K, CB, 40, 2>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+        case 48: launch_dpas<K, CB, 48, 2>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+#endif
 #ifndef EXL3_DPAS64_NT
 #define EXL3_DPAS64_NT 1
 #endif
@@ -134,7 +143,7 @@ static bool dispatch_dpas(int MB, const at::Tensor& xh, const at::Tensor& tr, co
 #ifndef EXL3_DPAS24_NT
 #define EXL3_DPAS24_NT 2
 #endif
-static int dpas_nt(int MB) { return MB == 4 ? EXL3_DPAS4_NT : MB == 8 ? EXL3_DPAS8_NT : MB == 24 ? EXL3_DPAS24_NT : (MB <= 16 ? 4 : (MB == 32 ? EXL3_DPAS32_NT : EXL3_DPAS64_NT)); }
+static int dpas_nt(int MB) { return MB == 4 ? EXL3_DPAS4_NT : MB == 8 ? EXL3_DPAS8_NT : MB == 24 ? EXL3_DPAS24_NT : (MB == 40 || MB == 48) ? 2 : (MB <= 16 ? 4 : (MB == 32 ? EXL3_DPAS32_NT : EXL3_DPAS64_NT)); }
 static int g_vec_max_m = 2;   // vector kernel for M<=2, DPAS (flat cost up to M=8) above
 
 // Split-K sizing: threads to aim for when choosing the number of K splits. Measured on B70 (all linears,
@@ -229,6 +238,8 @@ void exl3_gemm_small(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Tenso
     int MR = M <= 1 ? 1 : (M <= 2 ? 2 : (M <= 4 ? 4 : 8));
 #ifdef EXL3_DPAS_MB4
     int MB = M <= 4 ? 4 : (M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 32 ? 32 : 64)));
+#elif defined(EXL3_DPAS_MB24) && defined(EXL3_DPAS_MB48)
+    int MB = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 24 ? 24 : (M <= 32 ? 32 : (M <= 40 ? 40 : (M <= 48 ? 48 : 64)))));
 #elif defined(EXL3_DPAS_MB24)
     int MB = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 24 ? 24 : (M <= 32 ? 32 : 64)));
 #else
@@ -248,7 +259,7 @@ void exl3_gemm_small(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Tenso
     int n_strips = (N / 16) / (use_vec ? nt_for(K, MR) : dpas_nt(MB));
     int units = n_strips * m_blocks;
     int target = use_vec ? g_target_threads
-               : (MB <= 16 ? g_target_threads_mb16 : (MB >= 64 ? g_target_threads_mb64 : g_target_threads));
+               : (MB <= 16 ? g_target_threads_mb16 : (MB >= 40 ? g_target_threads_mb64 : g_target_threads));
     int P = std::max(1, std::min(tk, (target + units - 1) / units));
     int rps = (tk + P - 1) / P;
     P = (tk + rps - 1) / rps;
@@ -312,7 +323,9 @@ at::Tensor exl3_gemm_raw(at::Tensor xh_blocked, at::Tensor trellis, at::Tensor s
     int S = xh_blocked.size(0), Kdim = xh_blocked.size(1) * 16, M = xh_blocked.size(2);
     bool use_vec = path == 0;
     if (!use_vec) {
-#ifdef EXL3_DPAS_MB24
+#if defined(EXL3_DPAS_MB24) && defined(EXL3_DPAS_MB48)
+        int MBp = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 24 ? 24 : (M <= 32 ? 32 : (M <= 40 ? 40 : (M <= 48 ? 48 : 64)))));
+#elif defined(EXL3_DPAS_MB24)
         int MBp = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 24 ? 24 : (M <= 32 ? 32 : 64)));
 #else
         int MBp = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 32 ? 32 : 64));
@@ -323,6 +336,8 @@ at::Tensor exl3_gemm_raw(at::Tensor xh_blocked, at::Tensor trellis, at::Tensor s
     int MR = M <= 1 ? 1 : (M <= 2 ? 2 : (M <= 4 ? 4 : 8));
 #ifdef EXL3_DPAS_MB4
     int MB = M <= 4 ? 4 : (M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 32 ? 32 : 64)));
+#elif defined(EXL3_DPAS_MB24) && defined(EXL3_DPAS_MB48)
+    int MB = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 24 ? 24 : (M <= 32 ? 32 : (M <= 40 ? 40 : (M <= 48 ? 48 : 64)))));
 #elif defined(EXL3_DPAS_MB24)
     int MB = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 24 ? 24 : (M <= 32 ? 32 : 64)));
 #else

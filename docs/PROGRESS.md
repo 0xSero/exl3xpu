@@ -303,3 +303,8 @@ Timing probes (wrong-result debug builds, all linears, 2 reps):
 17..24 rows used to pad to MB=32. New MB=24 (3 x dpas.8x8, NT=2): all linears (2 reps) M=17 43.3 -> 41.1-41.2,
 M=20 44.0-44.4 -> 42.1-42.2, M=24 44.9-45.1 -> 42.6-42.7 ms (NT=4 spills: 110-112 ms). Extended Gate A1 (now incl.
 DPAS M=24) PASS. Default on (EXL3_NO_DPAS_MB24 opts out). Affects C5-C6 with MTP k=3.
+
+### DPAS MB=40/48 blocks (2026-09-23), kept
+33..48 rows used to pad to MB=64. New MB=40/48 (256-GRF, NT=2, split-K target 2048): all linears (2 reps) M=33
+59.4-60.0 -> 56.8-57.0, M=40 61.7-62.2 -> 58.3-58.7, M=44 62.8-63.4 -> 60.0-60.6, M=48 64.1-64.4 -> 61.5-61.6 ms.
+Extended Gate A1 (incl. DPAS M=40/48) PASS. Default on (EXL3_NO_DPAS_MB48 opts out).
