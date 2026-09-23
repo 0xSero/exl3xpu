@@ -231,3 +231,8 @@ GDN state dtype: vLLM "auto" already stores the temporal state in the model dtyp
 so the 3.1 MiB page is the fp16 size; lower would be fp8 state (quality risk). fp16 attention KV halves the block
 but also halves pool tokens (256K no longer fits). Conclusion: C16 thinking-on stays allocator-bound (KV_BOUND);
 C16 prose 327-337 vs C8 346-355.
+
+### MTP draft length, thinking on (2026-09-23, v3 build, B70 #1)
+agg tok/s C1 prose / C1 code / C4 prose / C4 code: k=2 61.9 / 55.3 / 219.5 / 187.6; k=3 70.3 / 58.3 / 237.5 /
+187.0; k=4 75.8 / 59.5 / 215.0 / 159.4. k=4 wins C1 (+8% prose), k=3 wins C4 (k=4 -9%/-15%). Next: vLLM dynamic
+SD schedule (num_speculative_tokens_per_batch_size) to use k=4 at batch 1 and k=3 above.
