@@ -279,3 +279,13 @@ near the integer-ALU roofline (~25 ms of ALU work per step vs 27-31 ms measured 
 - Gate A1 only exercised vector M=4 and DPAS M=64, so the production MB=8/16/32 DPAS and vector M=1/2 paths were
   untested at the weight level. tests/test_bitexact_xpu.py now also checks vector M=1/2 and DPAS M=3/8/16/32 on a
   128-row sample per tensor; it catches the halves bug, and the production kernel passes (GATE_A1_PASS, 401 tensors).
+
+### MB=64 DPAS kernel analysis (2026-09-23)
+ISA (256-GRF, no GRF spills; 102 predicate-flag spill loads in the epilogue store chain): IGC hoists part of the next
+tile's decode ahead of each 8-dpas burst. Per 16x16 tile per XVE: decode ~144 cycles (72 SIMD32 ALU), DPAS ~128
+(8 x dpas.8x8), serial sum ~272; measured ~423 (67 ms, 52 TFLOPS). Every layer type is equally slow at M=64
+(gate_up 199 GB/s with P=1, lm_head 232), so it is not split-K partials. Largest remaining term: each thread
+re-loads the 64-row activation block (2 KB per K-row, 1 KB per tile) from L1 at ~8 B/clk/XVE (~128 cycles/tile).
+Cheap fixes already measured and lost (MB=32 NT=4 halves A traffic but doubles decode: 100 ms at M=64).
+Next large-M lever is a redesign: decode each weight tile once into SLM and share it across threads that own
+different row blocks (decode once, A traffic per thread / MB), not a tuning change.
