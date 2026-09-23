@@ -98,15 +98,16 @@ ESIMD_INLINE simd<uint32_t, Geo<K>::G * TP> tile_states(simd<uint32_t, Geo<K>::W
     return st & 0xFFFFu;
 }
 
-// Load NT tiles' words and their circular previous-word vectors. prev comes from a second load
-// one dword earlier (L1 hit) with lane 0 of each tile patched; the very first tile of the tensor
-// (no dword before it) rotates in registers instead.
+// Load NT tiles' words and their circular previous-word vectors: prev is words shifted one dword in
+// registers with lane 0 of each tile patched (EXL3_PREV_FROM_MEM restores the old second load at p-1).
 template <int NT, int W>
 ESIMD_INLINE void load_words(const uint32_t* p, bool first, simd<uint32_t, NT * W>& words,
                              simd<uint32_t, NT * W>& prev) {
     words = block_load<uint32_t, NT * W>(p);
-#ifdef EXL3_PREV_FROM_REGS
-    first = true;   // every tile's prev[0] is patched below, so prev never needs memory before the tile
+#ifndef EXL3_PREV_FROM_MEM
+    // prev is words shifted by one dword; every tile's prev[0] is patched below, so the second (p-1) load
+    // was redundant. Measured on B70, all linears: M=1 32.5->29.2 ms, M=16 39.0->37.8, M=64 76.8->67.7.
+    first = true;
 #endif
     if (!first) {
         prev = block_load<uint32_t, NT * W>(p - 1);
@@ -509,6 +510,7 @@ struct DpasKernel {
         const fp16* xbase = xh + (size_t)shard * Mp * Kdim;   // blocked [k/16][Mp][16], pad rows zero
 
 #ifdef EXL3_DPAS_PREFETCH
+        // REJECTED (register pressure: M=16 39 -> 86 ms); kept for reference.
         // software pipeline: the next K-row's trellis words (the DRAM stream) load while this row computes
         simd<uint32_t, NT * W> nwords, nprevs;
         {

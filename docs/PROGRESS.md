@@ -181,3 +181,8 @@ M=64 best at 2048: 87.7->77.0 ms. New defaults 1024 / 2048 (MB=64); env EXL3_TAR
 Gate A1 PASS (401 tensors). Served, thinking on (agg tok/s, before -> after): C1 prose 61.4->68.6, code
 48.5->56.9; C8 prose 318.1->326.0, code 239.8->262.5; C16 prose 294.7->305.5, code 240.2->249.6.
 T1 now passes on both classes (code 56.9 >= 50).
+
+### load_words without the p-1 reload (2026-09-23), kept; DPAS word prefetch, rejected
+All linears (graph-captured, mean of 2 alternating reps), base -> prev-from-registers: M=1 32.5 -> 29.2,
+M=4 35.4 -> 35.2, M=16 39.0 -> 37.8, M=64 76.8 -> 67.7 ms. Gate A1 PASS. Double-buffered trellis words in
+DpasKernel (EXL3_DPAS_PREFETCH): M=16 39.0 -> 86.4 ms (register spill), M=64 76.8 -> 79.2: rejected.
