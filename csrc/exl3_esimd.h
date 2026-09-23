@@ -105,6 +105,9 @@ template <int NT, int W>
 ESIMD_INLINE void load_words(const uint32_t* p, bool first, simd<uint32_t, NT * W>& words,
                              simd<uint32_t, NT * W>& prev) {
     words = block_load<uint32_t, NT * W>(p);
+#ifdef EXL3_PREV_FROM_REGS
+    first = true;   // every tile's prev[0] is patched below, so prev never needs memory before the tile
+#endif
     if (!first) {
         prev = block_load<uint32_t, NT * W>(p - 1);
     } else {
@@ -505,10 +508,26 @@ struct DpasKernel {
         } else {
         const fp16* xbase = xh + (size_t)shard * Mp * Kdim;   // blocked [k/16][Mp][16], pad rows zero
 
+#ifdef EXL3_DPAS_PREFETCH
+        // software pipeline: the next K-row's trellis words (the DRAM stream) load while this row computes
+        simd<uint32_t, NT * W> nwords, nprevs;
+        {
+            size_t t0 = (size_t)r0 * tiles_n + tile_n0;
+            load_words<NT, W>(tr + t0 * W, t0 == 0, nwords, nprevs);
+        }
+#endif
         for (int r = r0; r < r1; ++r) {
             size_t t0 = (size_t)r * tiles_n + tile_n0;
             simd<uint32_t, NT * W> words, prevs;
+#ifdef EXL3_DPAS_PREFETCH
+            words = nwords; prevs = nprevs;
+            if (r + 1 < r1) {
+                size_t t1 = t0 + tiles_n;
+                load_words<NT, W>(tr + t1 * W, false, nwords, nprevs);
+            }
+#else
             load_words<NT, W>(tr + t0 * W, t0 == 0, words, prevs);
+#endif
             simd<fp16, MB * 16> Am = block_load<fp16, MB * 16>(xbase + ((size_t)r * Mp + m0) * 16);
 #pragma unroll
             for (int j = 0; j < NT; ++j) {

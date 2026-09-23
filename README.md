@@ -18,16 +18,16 @@ MTP speculative decoding k=3 (the EXL3 MTP head shipped in the checkpoint, draft
 blocks), fp8 KV cache (267,761 tokens, 8.2 GiB), max context 262,144, 16 sequences, image (4/prompt) and
 video (1/prompt) input. Model revision `113cf7ab958054860e43fb7f3063b1af19171095` (branch `4.00bpw`).
 
-Decode, aggregate tok/s (per-stream in brackets). Cold unique tokenizer-sized prompts, greedy, no output
+Decode, aggregate tok/s. C16 with thinking on is KV-bound (about 10 of 16 long-reasoning streams fit the fp8 pool). Cold unique tokenizer-sized prompts, greedy, no output
 cap, 60-90 s sustained windows (`bench/sweep.py`); raw rows in `bench/results/2026-09-23.jsonl`.
 
 | C | prose, think off | code, think off | prose, think on | code, think on |
 |---|---|---|---|---|
-| 1 | 47.2 (47.0) | 66.7 (66.3) | 61.4 (56.6) | 48.5 (47.7) |
-| 2 | 83.2 (42.7) | 119.8 (60.0) | 110.8 (54.1) | 82.7 (41.6) |
-| 4 | 138.6 (35.5) | 200.4 (50.0) | 175.6 (42.5) | 144.1 (35.0) |
-| 8 | 238.4 | 344.1 | 318.1 | 239.8 |
-| 16 | 233.1 | 332.5 | 294.7 | 240.2 (23.3) |
+| 1 | 53.9 | 75.3 | 64.5 | 54.3 |
+| 2 | 97.3 | 137.6 | 122.5 | 97.8 |
+| 4 | 170.7 | 240.1 | 223.0 | 173.0 |
+| 8 | 253.8 | 371.4 | 326.5 | 257.1 |
+| 16 | 241.5 | 349.0 | 312.3 | 257.0 |
 
 Cold prefill, one request: 4K **1589**, 32K **1497**, 128K **1049**, 254K **763** tok/s.
 
