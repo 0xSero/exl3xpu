@@ -240,3 +240,11 @@ Dynamic SD schedule [[1,1,4],[2,64,3]]: forces PIECEWISE mixed capture -> UR OUT
 at 5/12; sizes [5,8,16,32,64]: also fails). Rejected on this driver. Fixed k stays 3 (k=4 is the C1-only option).
 DSpark block-7 draft, thinking on (v3 build, max_model_len 32K as before): C1 prose 62.6 / code 22.0, C4 prose
 106.9 / code 88.0 (MTP k=3: 70.3 / 58.3 / 237.5 / 187.0), accept 2.44. Rejected for thinking-on.
+
+### K=6 planar trellis words (lm_head) (2026-09-23), kept
+K=6 has D=3 words per period, so the per-value word gathers used stride-3 register regions (Xe regions only
+stride by powers of two -> per-element moves, 2 per unrolled value). Words are now de-interleaved once per tile
+into D contiguous planes (GEMV: contiguous selects; DPAS B-build: <P,1,8,P> instead of <P,3,8,6>). K=4 (D=1)
+unchanged. Gate A1 PASS; outputs bitwise identical (24 layer/M cases). lm_head (1.27 GB, 6-bit): M=1 4.05 ->
+1.72 ms (235 -> 555 GB/s), M=4 3.82 -> 2.00, M=16 4.03 -> 2.20, M=64 5.38 -> 4.13. All linears: M=1 29.4 ->
+27.3, M=4 33.2 -> 31.7, M=16 36.2 -> 34.0-34.9 ms. (Opt-out: EXL3_NO_PLANAR.)

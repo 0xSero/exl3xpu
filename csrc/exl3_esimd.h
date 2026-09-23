@@ -80,17 +80,21 @@ ESIMD_INLINE simd<float, N> decode_cb(simd<uint32_t, N> st) {
 // state for value u of every period of TP adjacent tiles: words dw [TP*WORDS], prev[x] = dw[x - 1]
 // (circular per tile). Tiles are contiguous and WORDS is a multiple of D, so a stride-D select runs
 // straight across tile boundaries: TP=2 turns K=6's 16-lane vectors into 32-lane ones.
-template <int K, int u, int TP = 1>
+template <int K, int u, int TP = 1, bool PL = false>
 ESIMD_INLINE simd<uint32_t, Geo<K>::G * TP> tile_states(simd<uint32_t, Geo<K>::WORDS * TP> dw,
                                                          simd<uint32_t, Geo<K>::WORDS * TP> prev) {
     using Gm = Geo<K>;
     constexpr int D = Gm::D, G = Gm::G * TP;
+    // PL: dw/prev are planar (plane i = words D*g + i over g, contiguous), so the D>1 stride-D gathers
+    // become contiguous reads (Xe regions only stride by powers of two; stride 3 costs per-element moves)
+    constexpr int SS = PL ? 1 : D;      // select stride
+    constexpr int PS = PL ? G : 1;      // plane step
     constexpr int e = (u + 1) * K;                       // end bit within period
     constexpr int i1 = (e - 1) / 32;                     // word holding last bit
     constexpr int b0 = e - 16;                           // start bit (may be negative)
     constexpr int i0 = b0 >= 0 ? b0 / 32 : -1;           // word holding first bit
     constexpr int s = (i1 + 1) * 32 - e;                 // right shift aligning window end
-    simd<uint32_t, G> B = dw.template select<G, D>(i1);
+    simd<uint32_t, G> B = dw.template select<G, SS>(i1 * PS);
 #ifdef EXL3_DEBUG_NOSTATE
     return B;
 #endif
@@ -99,8 +103,8 @@ ESIMD_INLINE simd<uint32_t, Geo<K>::G * TP> tile_states(simd<uint32_t, Geo<K>::W
         st = B >> s;
     } else {
         simd<uint32_t, G> A;
-        if constexpr (i0 >= 0) A = dw.template select<G, D>(i0);
-        else A = prev.template select<G, D>(0);          // previous period's last word
+        if constexpr (i0 >= 0) A = dw.template select<G, SS>(i0 * PS);
+        else A = prev.template select<G, SS>(0);         // previous period's last word
         if constexpr (s == 0) st = B;
         else st = (A << (32 - s)) | (B >> s);
     }
@@ -125,6 +129,17 @@ ESIMD_INLINE void load_words(const uint32_t* p, bool first, simd<uint32_t, NT * 
     }
 #pragma unroll
     for (int j = 0; j < NT; ++j) prev[j * W] = words[j * W + W - 1];
+}
+
+// Reorder each group of D*GV words from interleaved (word D*g + i) to planar (plane i, lane g).
+template <int NGRP, int D, int GV>
+ESIMD_INLINE void planarize(simd<uint32_t, NGRP * D * GV>& v) {
+    simd<uint32_t, NGRP * D * GV> t = v;
+#pragma unroll
+    for (int jp = 0; jp < NGRP; ++jp)
+#pragma unroll
+        for (int i = 0; i < D; ++i)
+            v.template select<GV, 1>(jp * D * GV + i * GV) = t.template select<GV, D>(jp * D * GV + i);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -278,6 +293,12 @@ struct GemvKernel {
     static constexpr int G = Geo<K>::G;
     static constexpr int V = Geo<K>::V;
     static constexpr int W = Geo<K>::WORDS;
+    static constexpr int D = Geo<K>::D;
+#ifdef EXL3_NO_PLANAR
+    static constexpr bool PLANAR = false;
+#else
+    static constexpr bool PLANAR = D > 1;
+#endif
     static constexpr int TP = G >= 32 ? 1 : 32 / G;     // tiles decoded per vector op (K=6: 2)
     static constexpr int GV = G * TP;                   // vector lanes
     static constexpr int NP = NT / TP;                  // tile groups per thread
@@ -298,7 +319,7 @@ struct GemvKernel {
             for (int jp = 0; jp < NP; ++jp) {
                 simd<uint32_t, W * TP> dw = words.template select<W * TP, 1>(jp * W * TP);
                 simd<uint32_t, W * TP> pw = prev.template select<W * TP, 1>(jp * W * TP);
-                simd<fp16, GV> v = decode_cb_h<CB, GV>(tile_states<K, u, TP>(dw, pw));
+                simd<fp16, GV> v = decode_cb_h<CB, GV>(tile_states<K, u, TP, PLANAR>(dw, pw));
 #pragma unroll
                 for (int m = 0; m < MR; ++m) {
                     auto a = hacc.template select<GV, 1>(((m * NP + jp) * 2 + h) * GV);
@@ -332,6 +353,7 @@ struct GemvKernel {
                     size_t t0 = (size_t)r * tiles_n + tile_n0;
                     simd<uint32_t, NT * W> words, prev;
                     load_words<NT, W>(tr + t0 * W, t0 == 0, words, prev);
+                    if constexpr (PLANAR) { planarize<NP, D, GV>(words); planarize<NP, D, GV>(prev); }
                     simd<fp16, MR * 16> xr;
 #pragma unroll
                     for (int m = 0; m < MR; ++m)
@@ -348,6 +370,7 @@ struct GemvKernel {
             size_t t0 = (size_t)r * tiles_n + tile_n0;
             simd<uint32_t, NT * W> words, prev;
             load_words<NT, W>(tr + t0 * W, t0 == 0, words, prev);
+            if constexpr (PLANAR) { planarize<NP, D, GV>(words); planarize<NP, D, GV>(prev); }
             simd<fp16, MR * 16> xr = 0;
             if (M == MR) {
                 xr = block_load<fp16, MR * 16>(xbase + (size_t)r * M * 16);
@@ -413,6 +436,16 @@ struct DpasKernel {
     static constexpr int MS = 4 / P;                            // VNNI-row stride per b
     static_assert(A_ == 8, "lane geometry");
 
+#ifdef EXL3_NO_PLANAR
+    static constexpr bool PLANAR = false;
+#else
+    static constexpr bool PLANAR = D > 1;    // K=6: de-interleave words so the B-operand gathers use stride P
+#endif
+    // lane L = 8*b + a reads word D*(P*a + b) + i: interleaved <P, D, 8, D*P>, planar <P, 1, 8, P> at plane i
+    static constexpr int RVS = PLANAR ? 1 : D;
+    static constexpr int RHS = PLANAR ? P : D * P;
+    static constexpr int RPS = PLANAR ? G : 1;
+
     template <int u>
     static ESIMD_INLINE void build(simd<uint32_t, W>& dw, simd<uint32_t, W>& dwprev, simd<fp16, 256>& Bv) {
         if constexpr (u < V) {
@@ -422,14 +455,14 @@ struct DpasKernel {
             constexpr int i0 = b0 >= 0 ? b0 / 32 : -1;
             constexpr int s = (i1 + 1) * 32 - e;
             // transpose-read: lane L = 8*b + a  <->  word D*(P*a + b) + i
-            simd<uint32_t, G> Bw = dw.template replicate_vs_w_hs<P, D, 8, D * P>(i1);
+            simd<uint32_t, G> Bw = dw.template replicate_vs_w_hs<P, RVS, 8, RHS>(i1 * RPS);
             simd<uint32_t, G> st;
             if constexpr (i0 == i1) {
                 st = Bw >> s;
             } else {
                 simd<uint32_t, G> Aw;
-                if constexpr (i0 >= 0) Aw = dw.template replicate_vs_w_hs<P, D, 8, D * P>(i0);
-                else Aw = dwprev.template replicate_vs_w_hs<P, D, 8, D * P>(0);
+                if constexpr (i0 >= 0) Aw = dw.template replicate_vs_w_hs<P, RVS, 8, RHS>(i0 * RPS);
+                else Aw = dwprev.template replicate_vs_w_hs<P, RVS, 8, RHS>(0);
                 if constexpr (s == 0) st = Bw;
                 else st = (Aw << (32 - s)) | (Bw >> s);
             }
@@ -499,6 +532,7 @@ struct DpasKernel {
                     size_t t0 = (size_t)r * tiles_n + tile_n0;
                     simd<uint32_t, NT * W> words, prevs;
                     load_words<NT, W>(tr + t0 * W, t0 == 0, words, prevs);
+                    if constexpr (PLANAR) { planarize<NT, D, G>(words); planarize<NT, D, G>(prevs); }
                     simd<fp16, MB * 16> Am;
 #pragma unroll
                     for (int m = 0; m < MB; ++m)
@@ -532,12 +566,14 @@ struct DpasKernel {
             simd<uint32_t, NT * W> words, prevs;
 #ifdef EXL3_DPAS_PREFETCH
             words = nwords; prevs = nprevs;
+            if constexpr (PLANAR) { planarize<NT, D, G>(words); planarize<NT, D, G>(prevs); }
             if (r + 1 < r1) {
                 size_t t1 = t0 + tiles_n;
                 load_words<NT, W>(tr + t1 * W, false, nwords, nprevs);
             }
 #else
             load_words<NT, W>(tr + t0 * W, t0 == 0, words, prevs);
+            if constexpr (PLANAR) { planarize<NT, D, G>(words); planarize<NT, D, G>(prevs); }
 #endif
             simd<fp16, MB * 16> Am = block_load<fp16, MB * 16>(xbase + ((size_t)r * Mp + m0) * 16);
 #pragma unroll
