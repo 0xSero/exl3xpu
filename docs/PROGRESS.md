@@ -248,3 +248,8 @@ into D contiguous planes (GEMV: contiguous selects; DPAS B-build: <P,1,8,P> inst
 unchanged. Gate A1 PASS; outputs bitwise identical (24 layer/M cases). lm_head (1.27 GB, 6-bit): M=1 4.05 ->
 1.72 ms (235 -> 555 GB/s), M=4 3.82 -> 2.00, M=16 4.03 -> 2.20, M=64 5.38 -> 4.13. All linears: M=1 29.4 ->
 27.3, M=4 33.2 -> 31.7, M=16 36.2 -> 34.0-34.9 ms. (Opt-out: EXL3_NO_PLANAR.)
+Fused single-kernel linear (exl3_set_fused 1) re-tested on the current build: M=1 27.2 -> 28.4, M=4 31.4 -> 45.9 ms
+(small layers worse too: out_proj 366 -> 295 GB/s). Still rejected.
+Per-layer split-K target at M=1 (TARGET 512/1024/2048/4096): 1024 is best for every layer type (out_proj 344/367/
+340/284 GB/s, o_proj 339/360/337/279, down_proj 391/446/350/371). The small projections' ~360 GB/s is fixed
+per-call overhead (Hadamard kernels + gaps, ~5-8 us on a ~26 us GEMV), worth ~1 ms/step in total.
