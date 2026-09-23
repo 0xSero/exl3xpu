@@ -162,3 +162,11 @@ Prefill (cold): 4K 1589, 32K 1497, 128K 1049 tok/s. Vision + video tests pass. A
 C16 < C8 diagnosed: a C16 verify is M=64 tokens; the MB=64 DPAS kernel (1 tile/thread) took 124 ms for all
 linears vs 50.6 ms at M=32. Fixes measured (all linears, M=64): 2x MB=32 blocks 100 ms; MB=64 NT=1 256-GRF 105 ms;
 MB=64 NT=2 256-GRF 87.3 ms (kept, bit-exact); MB=32 NT=4 256-GRF regressed M=32 (60.4 vs 50.7, not kept).
+
+After the MB64 fix, C8/C16 re-measured on B70 #1: think off prose C8 238.4 / C16 233.1, code C8 344.1 / C16 332.5;
+think on prose C8 318.1 / C16 294.7, code C8 239.8 / C16 REQ_FAIL. The C16 failure was a UR DEVICE_LOST in
+graph replay at 12:09: the kernel log shows a job timeout on c3:00.0 at the same second another session's
+llama.cpp engine was started on that card (our engine was at 91.5% VRAM). Repro of the cell on the idle B70 #0:
+new MB64 (NT2, 256-GRF) 240.2 agg (23.3/stream, accept 2.27) with no errors; old MB64 197.3 (19.3/stream),
+also clean. Not a kernel bug; MB64 fix confirmed +22% on the cell. C16 still == C8 on think-on code: next is
+profiling the non-linear per-step cost at C16.
