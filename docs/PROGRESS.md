@@ -298,3 +298,8 @@ Timing probes (wrong-result debug builds, all linears, 2 reps):
 - MAXMB 32 / 16 (split large M into more blocks, re-decoding each tile per block), all linears 2 reps:
   M=32 46.2-46.5 (64) / 46.4-46.6 (32) / 71.4-72.0 (16); M=48 64.4 / 87.3 / 92.0; M=64 67.8-68.2 / 93.1-93.7 /
   140.3-141.1 ms. Current max block 64 stays.
+
+### DPAS MB=24 block (2026-09-23), kept
+17..24 rows used to pad to MB=32. New MB=24 (3 x dpas.8x8, NT=2): all linears (2 reps) M=17 43.3 -> 41.1-41.2,
+M=20 44.0-44.4 -> 42.1-42.2, M=24 44.9-45.1 -> 42.6-42.7 ms (NT=4 spills: 110-112 ms). Extended Gate A1 (now incl.
+DPAS M=24) PASS. Default on (EXL3_NO_DPAS_MB24 opts out). Affects C5-C6 with MTP k=3.
