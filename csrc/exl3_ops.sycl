@@ -3,6 +3,7 @@
 #include <torch/library.h>
 #include <c10/xpu/XPUStream.h>
 #include "exl3_esimd.h"
+#include "fa_esimd.h"
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 
 using namespace exl3;
@@ -287,6 +288,24 @@ void exl3_had_out_h(at::Tensor y, at::Tensor svh, at::Tensor out) {
     else TORCH_CHECK(false, "out dtype");
 }
 
+// ---- flash-attention forward (prefill), fp16, head_dim 256, GQA; returns O and natural-log LSE
+void exl3_fa_fwd(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor out, at::Tensor lse, bool causal, double scale) {
+    TORCH_CHECK(q.scalar_type() == at::kHalf && k.scalar_type() == at::kHalf && v.scalar_type() == at::kHalf);
+    TORCH_CHECK(q.is_contiguous() && k.is_contiguous() && v.is_contiguous() && out.is_contiguous() && lse.is_contiguous());
+    TORCH_CHECK(q.size(2) == 256 && k.size(2) == 256, "head_dim 256 only");
+    int Lq = q.size(0), Hq = q.size(1), Lk = k.size(0), Hk = k.size(1);
+    TORCH_CHECK(Hq % Hk == 0);
+    int G = Hq / Hk;
+    auto& qq = queue_of(q);
+    exl3fa::FaKernel kern{reinterpret_cast<const sycl::half*>(q.data_ptr()), reinterpret_cast<const sycl::half*>(k.data_ptr()),
+                          reinterpret_cast<const sycl::half*>(v.data_ptr()), reinterpret_cast<sycl::half*>(out.data_ptr()),
+                          lse.data_ptr<float>(), Lq, Lk, Hq, Hk, G, (float)(scale * 1.4426950408889634), causal ? 1 : 0};
+    int qtiles = (Lq + exl3fa::QR - 1) / exl3fa::QR;
+    int n = qtiles * Hk * G;
+    sycl::ext::oneapi::experimental::properties props{sycl::ext::intel::experimental::grf_size<256>};
+    qq.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(n, G), props, kern); });
+}
+
 bool exl3_supported(int64_t K, int64_t cb);
 
 // ------------------------------------------------------------------------------------------------
@@ -374,4 +393,6 @@ TORCH_LIBRARY(exl3xpu_C, m) {
     m.def("exl3_set_vec_max_m(int n) -> ()", &exl3_set_vec_max_m);
     m.def("exl3_set_fused(int on) -> ()", &exl3_set_fused);
     m.def("exl3_set_local(int n) -> ()", &exl3_set_local);
+    m.def("exl3_fa_fwd(Tensor q, Tensor k, Tensor v, Tensor(a!) out, Tensor(b!) lse, bool causal, float scale) -> ()");
+    m.impl("exl3_fa_fwd", torch::kXPU, &exl3_fa_fwd);
 }

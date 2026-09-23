@@ -134,3 +134,14 @@ work-group 4/16/32 and split-K 2048 (all worse than local 8 / 1024).
 Bounds: XPU FA2 = 69 TFLOPS (fp16) at head_dim 256, the only FA version shipped. 254K prefill at 69 TFLOPS
 attention + ~130 TFLOPS GEMMs caps near 800 tok/s; even a 100 TFLOPS attention kernel gives ~960.
 GPU runs 2600 MHz of 2800 under decode (~47 W card power; 230 W cap; power profile 'base').
+
+### Custom ESIMD flash-attention (user-requested, 2026-09-23)
+csrc/fa_esimd.h: fp16, head_dim 256, GQA, causal (bottom-right), O + LSE; 2D block loads (K^T transposed = VNNI,
+V VNNI-transformed), 8 query rows/thread, 256-GRF, online softmax base 2. tests/test_fa_esimd.py.
+| version | 8K causal | 8K x 32K | vs FA2 | kept |
+|---|---|---|---|---|
+| v1 exact rescale | 48.2 TF | 37.7 TF | FA2 61.3 / 75.2 TF | kept as experiment, not wired |
+| v2 lazy rescale (TAU=8) | 45.3 TF | 36.7 TF | no gain, rel err 1e-5 -> 4e-4 | reverted |
+Diagnosis: at head_dim 256 an 8-row fp32 O accumulator is 8 KB of the 16 KB GRF, so a thread cannot hold more
+query rows to reuse K/V tiles; ~8 FLOP/byte of L1 traffic per thread (x6 GQA heads re-reading the same tiles)
+puts ~100+ TFLOPS beyond Xe2 L1 bandwidth. 1000 tok/s at 256K needs ~117 TFLOPS attention: not credible on one B70.
