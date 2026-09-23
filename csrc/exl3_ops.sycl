@@ -14,10 +14,10 @@ static int round_up(int a, int b) { return (a + b - 1) / b * b; }
 
 template <typename TIn>
 static void launch_had_in(const at::Tensor& x, const at::Tensor& suh, at::Tensor& xh, sycl::queue& q) {
-    int M = x.size(0), Kdim = x.size(1), S = suh.size(0);
+    int M = x.size(0), Kdim = x.size(1), S = suh.size(0), Mp = xh.size(1);
     int n = S * M * (Kdim / 128);
     HadInKernel<TIn> k{reinterpret_cast<const TIn*>(x.data_ptr()), reinterpret_cast<const fp16*>(suh.data_ptr()),
-                       reinterpret_cast<fp16*>(xh.data_ptr()), M, Kdim, S, (int)x.stride(0)};
+                       reinterpret_cast<fp16*>(xh.data_ptr()), M, Kdim, S, (int)x.stride(0), Mp};
     int local = 8;
     q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
 }
@@ -52,10 +52,11 @@ static void launch_dpas(const at::Tensor& xh, const at::Tensor& tr, const at::Te
     int tiles_n = N / 16;
     int n_strips = tiles_n / NT;
     int m_blocks = (M + MB - 1) / MB;
+    TORCH_CHECK(xh.size(-2) == m_blocks * MB || (xh.dim() == 4 && xh.size(2) == m_blocks * MB), "xh rows must be padded to MB");
     DpasKernel<K, CB, MB, NT> k{reinterpret_cast<const fp16*>(xh.data_ptr()),
                                 reinterpret_cast<const uint32_t*>(tr.data_ptr()),
                                 shard.data_ptr<int>(), part.data_ptr<float>(),
-                                M, Kdim, N, tiles_n, rows_per_split, n_strips, m_blocks};
+                                M, Kdim, N, tiles_n, rows_per_split, n_strips, m_blocks, m_blocks * MB};
     int n = n_strips * m_blocks * P;
     int local = 8;
     q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
@@ -74,24 +75,26 @@ static bool dispatch_dpas(int MB, const at::Tensor& xh, const at::Tensor& tr, co
 }
 
 static int dpas_nt(int MB) { return MB <= 16 ? 4 : (MB == 32 ? 2 : 1); }
-static int g_vec_max_m = 4;
+static int g_vec_max_m = 2;   // vector kernel for M<=2, DPAS (flat cost up to M=8) above
 
 static int g_target_threads = 4096;
+
+// Column-strip width (tiles per thread) per case, from bench sweeps on B70:
+// K=4 M=1 -> 8 (longer contiguous reads), K=4 M=2..4 -> 4, K=6 -> 4 (two 32-lane tile pairs), M=8 -> 2.
+constexpr int nt_of(int K, int MR) { return MR == 8 ? 2 : (K <= 4 ? (MR == 1 ? 8 : 4) : 4); }
+static int nt_for(int K, int MR) { return nt_of(K, MR); }
 
 template <int K, int CB>
 static bool dispatch_mr(int MR, const at::Tensor& xh, const at::Tensor& tr, const at::Tensor& shard,
                         at::Tensor& part, int M, int Kdim, int N, int P, int rps, sycl::queue& q) {
-    constexpr int NTs = (K <= 4) ? 4 : 2;
     switch (MR) {
-        case 1: launch_gemv<K, CB, 1, NTs>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
-        case 2: launch_gemv<K, CB, 2, NTs>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
-        case 4: launch_gemv<K, CB, 4, NTs>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
-        case 8: launch_gemv<K, CB, 8, 2>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+        case 1: launch_gemv<K, CB, 1, nt_of(K, 1)>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+        case 2: launch_gemv<K, CB, 2, nt_of(K, 2)>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+        case 4: launch_gemv<K, CB, 4, nt_of(K, 4)>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+        case 8: launch_gemv<K, CB, 8, nt_of(K, 8)>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
     }
     return false;
 }
-
-static int nt_for(int K, int MR) { return MR == 8 ? 2 : (K <= 4 ? 4 : 2); }
 
 void exl3_gemm_small(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Tensor svh, at::Tensor shard_of_nb,
                      at::Tensor out, int64_t K, int64_t cb) {
@@ -99,15 +102,18 @@ void exl3_gemm_small(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Tenso
     TORCH_CHECK(trellis.scalar_type() == at::kShort && trellis.is_contiguous());
     auto& q = queue_of(x);
     int M = x.size(0), Kdim = x.size(1), N = svh.size(0), S = suh.size(0);
-    auto xh = at::empty({S, M, Kdim}, x.options().dtype(at::kHalf));
-    if (x.scalar_type() == at::kHalf) launch_had_in<fp16>(x, suh, xh, q);
-    else if (x.scalar_type() == at::kBFloat16) launch_had_in<sycl::ext::oneapi::bfloat16>(x, suh, xh, q);
-    else TORCH_CHECK(false, "x dtype");
-
     bool use_vec = M <= g_vec_max_m;
     int MR = M <= 1 ? 1 : (M <= 2 ? 2 : (M <= 4 ? 4 : 8));
     int MB = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 32 ? 32 : 64));
     int m_blocks = use_vec ? 1 : (M + MB - 1) / MB;
+    int Mp = use_vec ? M : m_blocks * MB;
+    // blocked activations [S][Mp][Kdim] (row-blocked inside); pad rows must be zero for DPAS
+    auto xh = Mp == M ? at::empty({S, Mp, Kdim}, x.options().dtype(at::kHalf))
+                      : at::zeros({S, Mp, Kdim}, x.options().dtype(at::kHalf));
+    if (x.scalar_type() == at::kHalf) launch_had_in<fp16>(x, suh, xh, q);
+    else if (x.scalar_type() == at::kBFloat16) launch_had_in<sycl::ext::oneapi::bfloat16>(x, suh, xh, q);
+    else TORCH_CHECK(false, "x dtype");
+
     int tk = Kdim / 16;
     int n_strips = (N / 16) / (use_vec ? nt_for(K, MR) : dpas_nt(MB));
     int units = n_strips * m_blocks;
@@ -117,6 +123,9 @@ void exl3_gemm_small(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Tenso
     auto part = at::empty({P, M, N}, x.options().dtype(at::kFloat));
 
     bool ok = false;
+#ifdef EXL3_DEBUG_SKIP_GEMV
+    ok = true; K = -1;
+#endif
 #define EXL3_CASE(KK, CC) \
     if (K == KK && cb == CC) ok = use_vec ? dispatch_mr<KK, CC>(MR, xh, trellis, shard_of_nb, part, M, Kdim, N, P, rps, q) \
                                           : dispatch_dpas<KK, CC>(MB, xh, trellis, shard_of_nb, part, M, Kdim, N, P, rps, q);
@@ -170,6 +179,11 @@ at::Tensor exl3_gemm_raw(at::Tensor xh_blocked, at::Tensor trellis, at::Tensor s
     auto& q = queue_of(xh_blocked);
     int S = xh_blocked.size(0), Kdim = xh_blocked.size(1) * 16, M = xh_blocked.size(2);
     bool use_vec = path == 0;
+    if (!use_vec) {
+        int MBp = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 32 ? 32 : 64));
+        int Mp = (M + MBp - 1) / MBp * MBp;
+        if (Mp != M) xh_blocked = at::constant_pad_nd(xh_blocked, {0, 0, 0, Mp - M}).contiguous();
+    }
     int MR = M <= 1 ? 1 : (M <= 2 ? 2 : (M <= 4 ? 4 : 8));
     int MB = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 32 ? 32 : 64));
     int tk = Kdim / 16;

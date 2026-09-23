@@ -82,9 +82,25 @@ class GpuSampler:
         return [None if x is None or y is None else round(100 * (1 - (y - x) / dt), 1) for x, y in zip(i0, i1)]
 
 
+_TOK = None
+
+
+def count_tokens(text: str) -> int:
+    """Token count of a streamed delta when the server does not report per-chunk usage."""
+    global _TOK
+    if _TOK is None:
+        from transformers import AutoTokenizer
+        _TOK = AutoTokenizer.from_pretrained(os.environ.get("TOKENIZER", "/models/turboderp-Qwen3.8-27B-exl3-4.00bpw"))
+    return max(1, len(_TOK(text, add_special_tokens=False)["input_ids"]))
+
+
 async def stream_one(session, url, model, prompt, max_tokens, temperature, thinking, rec):
+    # times[i] is a token arrival: a chunk carrying n tokens (speculative decoding emits several per chunk)
+    # appends its timestamp n times. n comes from vLLM's cumulative per-chunk usage when available,
+    # otherwise from tokenizing the delta text.
     body = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens,
-            "temperature": temperature, "stream": True, "stream_options": {"include_usage": True},
+            "temperature": temperature, "stream": True,
+            "stream_options": {"include_usage": True, "continuous_usage_stats": True},
             "chat_template_kwargs": {"enable_thinking": thinking}}
     if temperature > 0:
         body["top_p"] = 0.95
@@ -103,13 +119,21 @@ async def stream_one(session, url, model, prompt, max_tokens, temperature, think
                 if data == "[DONE]":
                     break
                 d = json.loads(data)
-                if d.get("usage"):
-                    rec["prompt_tokens"] = d["usage"].get("prompt_tokens")
-                    rec["completion_tokens"] = d["usage"].get("completion_tokens")
+                now = time.time()
+                usage = d.get("usage")
+                if usage:
+                    rec["prompt_tokens"] = usage.get("prompt_tokens")
+                    rec["completion_tokens"] = usage.get("completion_tokens")
                 for ch in d.get("choices", []):
                     delta = ch.get("delta", {})
-                    if delta.get("content") or delta.get("reasoning_content") or delta.get("reasoning"):
-                        rec["times"].append(time.time())
+                    text = delta.get("content") or delta.get("reasoning_content") or delta.get("reasoning")
+                    if text:
+                        if usage and usage.get("completion_tokens") is not None:
+                            n = usage["completion_tokens"] - rec.get("_seen", 0)
+                            rec["_seen"] = usage["completion_tokens"]
+                        else:
+                            n = count_tokens(text)
+                        rec["times"].extend([now] * max(1, n))
                     if ch.get("finish_reason"):
                         rec["finish"] = ch["finish_reason"]
         rec["ok"] = True
@@ -159,7 +183,8 @@ async def decode_cell(args, C, ctx, cls):
         if r.get("error"):
             fails += 1
         if len(ts) >= 16:
-            per_stream.append((len(ts) - 1) / (ts[-1] - ts[0]))
+            if ts[-1] > ts[0]:
+                per_stream.append((len(ts) - ts.count(ts[0])) / (ts[-1] - ts[0]))
             ttfts.append(ts[0] - r["t_send"])
             if r.get("ok"):
                 outs.append(r.get("completion_tokens") or len(ts))

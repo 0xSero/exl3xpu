@@ -10,24 +10,32 @@ source:
   quant: exl3 1.4.2, 4.00 bpw (lm_head 6 bpw), codebook mul1
   notes: >
     Hybrid Qwen3.5-architecture dense model: 64 layers (48 Gated DeltaNet + 16 gated full attention),
-    hidden 5120. in_proj_a/in_proj_b, norms and embeddings are unquantized bf16. The checkpoint ships no
-    MTP head and no vision tower, so it is served language-model-only.
+    hidden 5120. EXL3: all main linears (4 bpw), lm_head (6 bpw), MTP head incl. mtp.fc (4 bpw; not listed in
+    quantization_config.json's tensor_storage, detected from the weight index). bf16: norms, in_proj_a/b,
+    embeddings, the 27-block vision tower.
 
-# Per-B70 replica. Weights 14.9 GiB; the rest is KV / GDN state.
+# One B70: MTP (the EXL3 repo ships the MTP head quantized to EXL3 4-bit), vision (bf16 tower in the repo),
+# 256K context with fp8 KV. Weights 14.9 GiB + MTP head + vision; KV fp8 256K ~8.4 GiB.
 vllm:
   dtype: float16
-  language_model_only: true
-  max_model_len: 32768
-  gpu_memory_utilization: 0.90
-  max_num_seqs: 64
+  max_model_len: 262144
+  kv_cache_dtype: fp8
+  gpu_memory_utilization: 0.95
+  max_num_seqs: 8
   max_num_batched_tokens: 8192
   trust_remote_code: true
+  mamba_cache_mode: align
+  speculative_config:
+    method: qwen3_5_mtp
+    num_speculative_tokens: 3
+  limit_mm_per_prompt: {image: 4, video: 0}
   compilation_config:
     cudagraph_mode: FULL_DECODE_ONLY
-    cudagraph_capture_sizes: [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64]
+    cudagraph_capture_sizes: [1, 2, 4, 8, 12, 16, 24, 32]
 
 env:
   VLLM_XPU_ENABLE_XPU_GRAPH: "1"
+  EXL3_DRAFT_VOCAB: "{model_dir}/draft_vocab.json"   # pruned MTP draft head (scripts/draft_vocab.py)
   VLLM_WORKER_MULTIPROC_METHOD: spawn
 
 # Data parallel: one replica per GPU behind scripts/lb.py (the model fits one 32 GB B70).

@@ -33,19 +33,28 @@ CB_IDS = {"3inst": 0, "mcg": 1, "mul1": 2}
 
 
 def _norm_key(k: str) -> str:
-    """'model.language_model.layers.3.mlp.gate_proj' / 'language_model.model.layers.3...' -> 'layers.3.mlp.gate_proj'"""
+    """Canonical module name shared by checkpoint keys and vLLM prefixes:
+       'model.language_model.layers.3.mlp.gate_proj' / 'language_model.model.layers.3.mlp.gate_proj'
+           -> 'layers.3.mlp.gate_proj'
+       'mtp.layers.0.mlp.gate_proj' / 'model.mtp.layers.0...' -> 'mtp.layers.0.mlp.gate_proj'
+       '...lm_head' -> 'lm_head'"""
+    parts = k.split(".")
+    if "mtp" in parts:
+        return "mtp." + ".".join(parts[parts.index("mtp") + 1:])
     m = re.search(r"(layers\.\d+\..*)$", k)
     if m:
         return m.group(1)
-    return k.split(".")[-1]  # lm_head, etc.
+    return parts[-1]
 
 
 @register_quantization_config("exl3")
 class Exl3Config(QuantizationConfig):
 
-    def __init__(self, bits: float, head_bits: int, codebook: str, storage: dict | None = None):
+    def __init__(self, bits: float, head_bits: int, codebook: str, storage: dict | None = None,
+                 mtp_bits: int | None = None):
         super().__init__()
         self.bits = bits
+        self.mtp_bits = int(mtp_bits or bits)
         self.head_bits = head_bits
         self.codebook = codebook
         self.storage = storage or {}
@@ -70,33 +79,54 @@ class Exl3Config(QuantizationConfig):
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "Exl3Config":
         return cls(bits=config.get("bits", 4), head_bits=config.get("head_bits", 6),
-                   codebook=config.get("codebook", "mul1"))
+                   codebook=config.get("codebook", "mul1"), mtp_bits=config.get("mtp_bits"))
+
+    def _model_file(self, model_name, fname, revision):
+        path = os.path.join(model_name, fname)
+        if os.path.isfile(path):
+            return path
+        try:
+            from huggingface_hub import hf_hub_download
+            return hf_hub_download(model_name, fname, revision=revision)
+        except Exception:
+            return None
 
     def maybe_update_config(self, model_name: str, hf_config=None, revision=None):
-        path = os.path.join(model_name, "quantization_config.json")
-        if not os.path.isfile(path):
-            try:
-                from huggingface_hub import hf_hub_download
-                path = hf_hub_download(model_name, "quantization_config.json", revision=revision)
-            except Exception:
-                logger.warning("exl3: no quantization_config.json found; assuming all linears are EXL3")
-                return
-        with open(path) as f:
-            ts = json.load(f).get("tensor_storage", {})
-        for key, v in ts.items():
-            if v.get("quant_format") == "exl3":
-                self.storage[_norm_key(key)] = int(v.get("bits_per_weight", self.bits))
-        logger.info("exl3: %d quantized tensors in storage map", len(self.storage))
+        # Which modules are EXL3 is decided by the checkpoint itself: a module is EXL3 iff the weight
+        # index has '<module>.trellis'. (quantization_config.json's tensor_storage omits the MTP head.)
+        idx_path = self._model_file(model_name, "model.safetensors.index.json", revision)
+        qc_path = self._model_file(model_name, "quantization_config.json", revision)
+        stored = {}
+        if qc_path:
+            with open(qc_path) as f:
+                for key, v in json.load(f).get("tensor_storage", {}).items():
+                    if v.get("quant_format") == "exl3":
+                        stored[_norm_key(key)] = int(v.get("bits_per_weight", self.bits))
+        if idx_path:
+            with open(idx_path) as f:
+                wmap = json.load(f)["weight_map"]
+            for name in wmap:
+                if name.endswith(".trellis"):
+                    key = _norm_key(name[: -len(".trellis")])
+                    default = self.mtp_bits if key.startswith("mtp.") else int(self.bits)
+                    self.storage[key] = stored.get(key, default)
+        else:
+            self.storage.update(stored)
+        logger.info("exl3: %d EXL3 modules (%d in MTP head)", len(self.storage),
+                    sum(1 for k in self.storage if k.startswith("mtp.")))
 
     def _bits_for(self, prefix: str) -> int | None:
+        parts = prefix.split(".")
+        if "visual" in parts or "vision_tower" in parts:
+            return None
         key = _norm_key(prefix)
         if not self.storage:
             if key.endswith("in_proj_ba"):
                 return None
             return self.head_bits if key == "lm_head" else int(self.bits)
         base, _, leaf = key.rpartition(".")
-        parts = FUSED.get(leaf, [leaf])
-        names = [f"{base}.{p}" if base else p for p in parts]
+        members = FUSED.get(leaf, [leaf])
+        names = [f"{base}.{p}" if base else p for p in members]
         bits = [self.storage.get(n) for n in names]
         if all(b is None for b in bits):
             return None
@@ -204,6 +234,8 @@ class Exl3LinearMethod(LinearMethodBase):
         layer.suh = Parameter(suh, requires_grad=False)
         layer.exl3_shard_of_nb = shard_of_nb.to(dev)
         layer.exl3_bounds = bounds
+        if isinstance(layer, ParallelLMHead) and os.environ.get("EXL3_DRAFT_VOCAB"):
+            _build_draft_head(layer, os.environ["EXL3_DRAFT_VOCAB"])
         cb = self.cb
         if hasattr(layer, "mcg"):
             cb = 1
@@ -224,7 +256,58 @@ class Exl3LinearMethod(LinearMethodBase):
         raise NotImplementedError("exl3: quantized input embeddings are not supported")
 
 
+# ------------------------------------------------------------------------------------------------
+# Pruned-vocabulary draft head for MTP speculative decoding.
+# The drafter proposes tokens from a subset of 128-token blocks (EXL3 lm_head columns can only be
+# sliced by whole 128-column Hadamard blocks); the target still verifies with the full lm_head, so
+# generated text is unchanged. Enabled by EXL3_DRAFT_VOCAB=<draft_vocab.json> (see scripts/draft_vocab.py).
+
+def _build_draft_head(layer, path):
+    with open(path) as f:
+        spec = json.load(f)
+    blocks = torch.tensor(spec["blocks"], dtype=torch.long)
+    n_total_blocks = layer.svh.shape[0] // 128
+    blocks = blocks[blocks < n_total_blocks]
+    dev = layer.trellis.device
+    tiles = (blocks[:, None] * 8 + torch.arange(8)[None, :]).flatten().to(dev)
+    trellis = layer.trellis.data.index_select(1, tiles).contiguous()
+    svh = layer.svh.data.view(-1, 128).index_select(0, blocks.to(dev)).flatten().contiguous()
+    idx = (blocks[:, None] * 128 + torch.arange(128)[None, :]).flatten().to(dev)
+    layer.exl3_draft = dict(trellis=trellis, svh=svh, idx=idx,
+                            shard=torch.zeros(len(blocks), dtype=torch.int32, device=dev),
+                            bounds=[0, len(blocks) * 128])
+    logger.info("exl3: MTP draft head uses %d of %d vocab blocks (%.1f%% of lm_head)",
+                len(blocks), n_total_blocks, 100.0 * len(blocks) / n_total_blocks)
+
+
+def _patch_mtp_draft_logits():
+    try:
+        from vllm.model_executor.models import qwen3_5_mtp
+    except Exception:
+        return
+    cls = qwen3_5_mtp.Qwen3_5MTP
+    if getattr(cls, "_exl3_patched", False):
+        return
+    orig = cls.compute_logits
+
+    def compute_logits(self, hidden_states, spec_step_idx: int = 0):
+        lm = self.lm_head
+        d = getattr(lm, "exl3_draft", None)
+        if d is None:
+            return orig(self, hidden_states, spec_step_idx)
+        from .ops import exl3_linear
+        sub = exl3_linear(hidden_states, d["trellis"], lm.suh, d["svh"], d["shard"], d["bounds"],
+                          lm.exl3_K, lm.exl3_cb)
+        logits = hidden_states.new_full((hidden_states.shape[0], lm.svh.shape[0]), float("-inf"))
+        logits.index_copy_(1, d["idx"], sub)
+        return logits[:, : self.config.vocab_size]
+
+    cls.compute_logits = compute_logits
+    cls._exl3_patched = True
+
+
 def register():
-    """vllm.general_plugins entry point."""
-    # import side effect registers the config
+    """vllm.general_plugins entry point (runs in every vLLM process)."""
+    if os.environ.get("EXL3_DRAFT_VOCAB"):
+        _patch_mtp_draft_logits()
     return None

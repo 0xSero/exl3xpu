@@ -21,7 +21,7 @@ def _get_esimd():
     global _esimd
     if _esimd is None:
         try:
-            torch.ops.load_library(os.path.join(os.path.dirname(__file__), "_C.so"))
+            torch.ops.load_library(os.environ.get("EXL3_LIB") or os.path.join(os.path.dirname(__file__), "_C.so"))
             _esimd = torch.ops.exl3xpu_C
         except Exception as e:  # noqa
             import logging

@@ -38,20 +38,17 @@ template <int K> struct Geo {
 
 template <int CB, int N>
 ESIMD_INLINE simd<fp16, N> decode_cb_h(simd<uint32_t, N> st) {
+#ifdef EXL3_DEBUG_NODECODE
+    return convert<fp16>(st);
+#endif
     // Bit-exact with exllamav3 decode_3inst<cb> (CUDA): same integer ops, same fp16 roundings.
     if constexpr (CB == 2) {  // mul1
         simd<uint32_t, N> x = st * 0x83DCD12Du;
-#ifdef EXL3_NO_DP4A
-        simd<uint32_t, N> y = (x & 0x00FF00FFu) + ((x >> 8) & 0x00FF00FFu);
-        simd<uint32_t, N> bs = (y & 0xFFFFu) + (y >> 16);
-        bs += 1024u;
-#else
-        // 1024 + byte sum in one instruction: 1024 + dot(bytes(x), {1,1,1,1})
+        // 0x6400 + byte sum in one instruction; its low 16 bits ARE fp16(1024 + byte sum) (< 2048)
         simd<uint32_t, N> bs = dp4a<uint32_t, uint32_t, uint32_t, uint32_t, N>(
-            simd<uint32_t, N>(1024u), x, simd<uint32_t, N>(0x01010101u));
-#endif
-        // 0x6400 + bs as fp16 == 1024 + bs exactly (< 2048); then __hfma(h, 0x1eee, 0xc931)
-        simd<fp16, N> h = convert<fp16>(bs);
+            simd<uint32_t, N>(0x6400u), x, simd<uint32_t, N>(0x01010101u));
+        simd<fp16, N> h = bs.template bit_cast_view<fp16>().template select<N, 2>(0);
+        // __hfma(h, 0x1eee, 0xc931): single fp16 rounding, bit-exact with exllamav3
         return h * fp16(0.00676727294921875f) + fp16(-10.3828125f);
     } else {
         simd<uint32_t, N> x;
@@ -71,33 +68,50 @@ ESIMD_INLINE simd<float, N> decode_cb(simd<uint32_t, N> st) {
     return convert<float>(decode_cb_h<CB, N>(st));
 }
 
-// state for value u of every period in a tile: words dw [WORDS]
-template <int K, int u>
-ESIMD_INLINE simd<uint32_t, Geo<K>::G> tile_states(simd<uint32_t, Geo<K>::WORDS> dw) {
+// state for value u of every period of TP adjacent tiles: words dw [TP*WORDS], prev[x] = dw[x - 1]
+// (circular per tile). Tiles are contiguous and WORDS is a multiple of D, so a stride-D select runs
+// straight across tile boundaries: TP=2 turns K=6's 16-lane vectors into 32-lane ones.
+template <int K, int u, int TP = 1>
+ESIMD_INLINE simd<uint32_t, Geo<K>::G * TP> tile_states(simd<uint32_t, Geo<K>::WORDS * TP> dw,
+                                                         simd<uint32_t, Geo<K>::WORDS * TP> prev) {
     using Gm = Geo<K>;
-    constexpr int D = Gm::D, G = Gm::G, W = Gm::WORDS;
+    constexpr int D = Gm::D, G = Gm::G * TP;
     constexpr int e = (u + 1) * K;                       // end bit within period
     constexpr int i1 = (e - 1) / 32;                     // word holding last bit
     constexpr int b0 = e - 16;                           // start bit (may be negative)
     constexpr int i0 = b0 >= 0 ? b0 / 32 : -1;           // word holding first bit
     constexpr int s = (i1 + 1) * 32 - e;                 // right shift aligning window end
     simd<uint32_t, G> B = dw.template select<G, D>(i1);
+#ifdef EXL3_DEBUG_NOSTATE
+    return B;
+#endif
     simd<uint32_t, G> st;
     if constexpr (i0 == i1) {
         st = B >> s;
     } else {
         simd<uint32_t, G> A;
-        if constexpr (i0 >= 0) {
-            A = dw.template select<G, D>(i0);
-        } else {
-            // previous period's last word; lane 0 wraps to the tile's last word
-            A.template select<G - 1, 1>(1) = dw.template select<G - 1, D>(D - 1);
-            A[0] = dw[W - 1];
-        }
+        if constexpr (i0 >= 0) A = dw.template select<G, D>(i0);
+        else A = prev.template select<G, D>(0);          // previous period's last word
         if constexpr (s == 0) st = B;
         else st = (A << (32 - s)) | (B >> s);
     }
     return st & 0xFFFFu;
+}
+
+// Load NT tiles' words and their circular previous-word vectors. prev comes from a second load
+// one dword earlier (L1 hit) with lane 0 of each tile patched; the very first tile of the tensor
+// (no dword before it) rotates in registers instead.
+template <int NT, int W>
+ESIMD_INLINE void load_words(const uint32_t* p, bool first, simd<uint32_t, NT * W>& words,
+                             simd<uint32_t, NT * W>& prev) {
+    words = block_load<uint32_t, NT * W>(p);
+    if (!first) {
+        prev = block_load<uint32_t, NT * W>(p - 1);
+    } else {
+        prev.template select<NT * W - 1, 1>(1) = words.template select<NT * W - 1, 1>(0);
+    }
+#pragma unroll
+    for (int j = 0; j < NT; ++j) prev[j * W] = words[j * W + W - 1];
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -124,7 +138,7 @@ constexpr float kRsqrt128 = 0.08838834764831845f;
 template <typename TIn>
 struct HadInKernel {
     const TIn* x; const fp16* suh; fp16* xh;
-    int M, Kdim, S, x_stride;
+    int M, Kdim, S, x_stride, Mp;   // Mp: padded row count of the blocked xh layout
     void operator()(sycl::nd_item<1> it) const SYCL_ESIMD_KERNEL {
         int id = it.get_global_id(0);
         int kb_n = Kdim / 128;
@@ -144,7 +158,7 @@ struct HadInKernel {
         int kt = Kdim / 16;
 #pragma unroll
         for (int i = 0; i < 8; ++i)
-            block_store<fp16, 16>(xh + (((size_t)g * kt + kb * 8 + i) * M + m) * 16, vh.template select<16, 1>(i * 16));
+            block_store<fp16, 16>(xh + (((size_t)g * kt + kb * 8 + i) * Mp + m) * 16, vh.template select<16, 1>(i * 16));
     }
 };
 
@@ -187,32 +201,34 @@ struct GemvKernel {
     static constexpr int G = Geo<K>::G;
     static constexpr int V = Geo<K>::V;
     static constexpr int W = Geo<K>::WORDS;
-    // accumulator layout: acc[((m * NT + j) * 2 + h) * G + grp]
-    static constexpr int ACC = MR * NT * 2 * G;
+    static constexpr int TP = G >= 32 ? 1 : 32 / G;     // tiles decoded per vector op (K=6: 2)
+    static constexpr int GV = G * TP;                   // vector lanes
+    static constexpr int NP = NT / TP;                  // tile groups per thread
+    static_assert(NT % TP == 0, "NT must be a multiple of the tile pairing");
+    // accumulator layout: acc[((m * NP + jp) * 2 + h) * GV + lane]
+    static constexpr int ACC = MR * NP * 2 * GV;
 
     template <int u>
-    static ESIMD_INLINE void step(simd<uint32_t, NT * W>& words, simd<float, MR * 16>& xr, simd<float, ACC>& acc) {
+    static ESIMD_INLINE void step(simd<uint32_t, NT * W>& words, simd<uint32_t, NT * W>& prev,
+                                  simd<fp16, MR * 16>& xr, simd<fp16, ACC>& hacc) {
         if constexpr (u < V) {
             constexpr int h = (u >> 2) & 1;
             // row(grp, u) = R0 + STR * (grp % P): a strided replicate of the 16-row x block
             constexpr int P = V == 8 ? 4 : (V == 16 ? 2 : 1);
             constexpr int STR = V == 8 ? 2 : (V == 16 ? 4 : 1);
             constexpr int R0 = 8 * ((u >> 1) & 1) + 2 * ((u >> 3) & 3) + (u & 1);
-            simd<float, MR * G> xv;
 #pragma unroll
-            for (int m = 0; m < MR; ++m)
-                xv.template select<G, 1>(m * G) = xr.template replicate_vs_w_hs<G / P, 0, P, STR>(m * 16 + R0);
-#pragma unroll
-            for (int j = 0; j < NT; ++j) {
-                simd<uint32_t, W> dw = words.template select<W, 1>(j * W);
-                simd<float, G> v = decode_cb<CB, G>(tile_states<K, u>(dw));
+            for (int jp = 0; jp < NP; ++jp) {
+                simd<uint32_t, W * TP> dw = words.template select<W * TP, 1>(jp * W * TP);
+                simd<uint32_t, W * TP> pw = prev.template select<W * TP, 1>(jp * W * TP);
+                simd<fp16, GV> v = decode_cb_h<CB, GV>(tile_states<K, u, TP>(dw, pw));
 #pragma unroll
                 for (int m = 0; m < MR; ++m) {
-                    auto a = acc.template select<G, 1>(((m * NT + j) * 2 + h) * G);
-                    a += v * xv.template select<G, 1>(m * G);
+                    auto a = hacc.template select<GV, 1>(((m * NP + jp) * 2 + h) * GV);
+                    a += v * xr.template replicate_vs_w_hs<GV / P, 0, P, STR>(m * 16 + R0);
                 }
             }
-            step<u + 1>(words, xr, acc);
+            step<u + 1>(words, prev, xr, hacc);
         }
     }
 
@@ -231,22 +247,25 @@ struct GemvKernel {
         const fp16* xbase = xh + (size_t)shard * M * Kdim;   // blocked [k/16][M][16]
 
         for (int r = r0; r < r1; ++r) {
-            simd<uint32_t, NT * W> words =
-                block_load<uint32_t, NT * W>(tr + ((size_t)r * tiles_n + tile_n0) * W);
-            simd<float, MR * 16> xr = 0.0f;
+            size_t t0 = (size_t)r * tiles_n + tile_n0;
+            simd<uint32_t, NT * W> words, prev;
+            load_words<NT, W>(tr + t0 * W, t0 == 0, words, prev);
+            simd<fp16, MR * 16> xr = 0;
             if (M == MR) {
-                xr = convert<float>(block_load<fp16, MR * 16>(xbase + (size_t)r * M * 16));
+                xr = block_load<fp16, MR * 16>(xbase + (size_t)r * M * 16);
             } else {
 #pragma unroll
                 for (int m = 0; m < MR; ++m)
                     if (m < M)
-                        xr.template select<16, 1>(m * 16) =
-                            convert<float>(block_load<fp16, 16>(xbase + ((size_t)r * M + m) * 16));
+                        xr.template select<16, 1>(m * 16) = block_load<fp16, 16>(xbase + ((size_t)r * M + m) * 16);
             }
-            step<0>(words, xr, acc);
+            // fp16 partial dot products over one tile-row (few terms per lane), folded into fp32
+            simd<fp16, ACC> hacc = 0;
+            step<0>(words, prev, xr, hacc);
+            acc += convert<float>(hacc);
         }
 
-        // reduce groups of L = 32/V adjacent lanes -> 8 columns per half
+        // reduce groups of L = 32/V adjacent lanes -> 8 columns per half, per tile
         constexpr int L = 32 / V;
 #pragma unroll
         for (int m = 0; m < MR; ++m) {
@@ -256,8 +275,7 @@ struct GemvKernel {
                 simd<float, 16> o;
 #pragma unroll
                 for (int h = 0; h < 2; ++h) {
-                    constexpr int dummy = 0; (void)dummy;
-                    int base = ((m * NT + j) * 2 + h) * G;
+                    int base = ((m * NP + j / TP) * 2 + h) * GV + (j % TP) * G;
                     simd<float, 8> s = acc.template select<8, L>(base);
 #pragma unroll
                     for (int l = 1; l < L; ++l) s += acc.template select<8, L>(base + l);
@@ -285,7 +303,7 @@ struct DpasKernel {
     const uint32_t* tr;      // [Kdim/16, N/16, 8K]
     const int* shard_of_nb;  // [N/128]
     float* part;             // [P, M, N]
-    int M, Kdim, N, tiles_n, rows_per_split, n_strips, m_blocks;
+    int M, Kdim, N, tiles_n, rows_per_split, n_strips, m_blocks, Mp;   // xh rows padded to Mp = m_blocks * MB
 
     static constexpr int G = Geo<K>::G, V = Geo<K>::V, D = Geo<K>::D, W = Geo<K>::WORDS;
     static constexpr int P = V == 8 ? 4 : (V == 16 ? 2 : 1);   // grp period in rows
@@ -341,35 +359,17 @@ struct DpasKernel {
         int mrows = M - m0; if (mrows > MB) mrows = MB;
 
         simd<float, MB * 16 * NT> acc = 0.0f;   // [NT][MB][16]
-        const fp16* xbase = xh + (size_t)shard * M * Kdim;   // blocked [k/16][M][16]
+        const fp16* xbase = xh + (size_t)shard * Mp * Kdim;   // blocked [k/16][Mp][16], pad rows zero
 
         for (int r = r0; r < r1; ++r) {
-            simd<uint32_t, NT * W> words =
-                block_load<uint32_t, NT * W>(tr + ((size_t)r * tiles_n + tile_n0) * W);
-            simd<fp16, MB * 16> Am;
-            const fp16* arow = xbase + ((size_t)r * M + m0) * 16;
-            if (mrows == MB) {
-                Am = block_load<fp16, MB * 16>(arow);
-            } else {
-                Am = 0;
-#pragma unroll
-                for (int m8 = 0; m8 < MB; m8 += 8) {
-                    if (m8 + 8 <= mrows) Am.template select<128, 1>(m8 * 16) = block_load<fp16, 128>(arow + m8 * 16);
-                    else {
-#pragma unroll
-                        for (int m = 0; m < 8; ++m)
-                            if (m8 + m < mrows)
-                                Am.template select<16, 1>((m8 + m) * 16) = block_load<fp16, 16>(arow + (m8 + m) * 16);
-                    }
-                }
-            }
+            size_t t0 = (size_t)r * tiles_n + tile_n0;
+            simd<uint32_t, NT * W> words, prevs;
+            load_words<NT, W>(tr + t0 * W, t0 == 0, words, prevs);
+            simd<fp16, MB * 16> Am = block_load<fp16, MB * 16>(xbase + ((size_t)r * Mp + m0) * 16);
 #pragma unroll
             for (int j = 0; j < NT; ++j) {
                 simd<uint32_t, W> dw = words.template select<W, 1>(j * W);
-                // previous-period last word per period start: dwprev[D*g] = dw[D*g - 1] (wrap)
-                simd<uint32_t, W> dwprev;
-                dwprev.template select<W - 1, 1>(1) = dw.template select<W - 1, 1>(0);
-                dwprev[0] = dw[W - 1];
+                simd<uint32_t, W> dwprev = prevs.template select<W, 1>(j * W);
                 simd<fp16, 256> Bv;
                 build<0>(dw, dwprev, Bv);
 #pragma unroll

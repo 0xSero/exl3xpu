@@ -19,7 +19,9 @@ def load(path):
     if os.path.isdir(path):
         path = os.path.join(path, "model.yaml")
     with open(path) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    cfg["_dir"] = os.path.dirname(os.path.abspath(path))
+    return cfg
 
 
 def model_path(cfg, override):
@@ -55,7 +57,8 @@ def vllm_argv(cfg, path, port, extra):
 
 def env_for(cfg, gpu):
     env = dict(os.environ)
-    env.update({k: str(v) for k, v in (cfg.get("env") or {}).items()})
+    mdir = cfg.get("_dir", "")
+    env.update({k: str(v).replace("{model_dir}", mdir) for k, v in (cfg.get("env") or {}).items()})
     env["ZE_AFFINITY_MASK"] = str(gpu)
     return env
 
@@ -68,10 +71,19 @@ def main():
     ap.add_argument("--dp", action="store_true", help="one replica per GPU in parallel.gpus + load balancer")
     ap.add_argument("--model-path")
     ap.add_argument("--print", action="store_true")
+    ap.add_argument("--set", action="append", default=[], metavar="KEY.PATH=VALUE",
+                    help="override a config value, e.g. vllm.speculative_config.num_speculative_tokens=5 (YAML value)")
     ap.add_argument("--log-dir", default=os.path.join(ROOT, "logs"))
     args, extra = ap.parse_known_args()
     extra = [e for e in extra if e != "--"]
     cfg = load(args.config)
+    for item in args.set:
+        key, _, val = item.partition("=")
+        node = cfg
+        *parents, leaf = key.split(".")
+        for k in parents:
+            node = node.setdefault(k, {})
+        node[leaf] = yaml.safe_load(val)
     path = model_path(cfg, args.model_path)
 
     if not args.dp:
