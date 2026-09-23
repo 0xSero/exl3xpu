@@ -236,3 +236,5 @@ C16 prose 327-337 vs C8 346-355.
 agg tok/s C1 prose / C1 code / C4 prose / C4 code: k=2 61.9 / 55.3 / 219.5 / 187.6; k=3 70.3 / 58.3 / 237.5 /
 187.0; k=4 75.8 / 59.5 / 215.0 / 159.4. k=4 wins C1 (+8% prose), k=3 wins C4 (k=4 -9%/-15%). Next: vLLM dynamic
 SD schedule (num_speculative_tokens_per_batch_size) to use k=4 at batch 1 and k=3 above.
+Dynamic SD schedule [[1,1,4],[2,64,3]]: forces PIECEWISE mixed capture -> UR OUT_OF_RESOURCES (12 sizes: fails
+at 5/12; sizes [5,8,16,32,64]: also fails). Rejected on this driver. Fixed k stays 3 (k=4 is the C1-only option).
