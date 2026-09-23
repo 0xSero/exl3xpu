@@ -219,3 +219,11 @@ the 21-35 s prefill falls in the 60 s window. C4 x 32K (150 s warm-up): aggregat
 39-59 s: prefill-bound, every stream re-prefills a fresh 32K prompt per few hundred output tokens.
 max_num_batched_tokens 2048 / 4096 vs 8192: prefill 4K 1568 / 1666 vs 1589, 32K 1407 / 1474 vs 1497; C4 x 32K
 unchanged (2.8 / 13.2 and 2.7 / 1.5). Kept 8192. Cells recorded with PREFILL_IN_WINDOW / PREFILL_BOUND flags.
+
+### C16 thinking-on concurrency (2026-09-23)
+Engine log at C16 think-on: Running 10 / Waiting 6 at 91.5% KV; 8 running = 73%; 1 running = 9.2%. One stream
+of ~2.1K tokens holds ~12 of ~131 blocks: the hybrid allocator uses one page size for all KV-cache groups; the
+GDN state (3.1 MiB/layer, padded 4 MiB) forces 2048-token attention blocks under fp8 KV, and each group
+allocates whole blocks. mamba_cache_mode default (drop align): C8/C16 prose 354.0/332.8, code 268.2/274.5
+(vs 355.2/327.0, 275.5/270.9): noise, same 10 running. enable_prefix_caching=false: 346.6/336.9, 268.9/267.7,
+same 10 running. Both rejected. Lever left: GDN state dtype (page size), needs a quality check (Gate A3).
