@@ -1,5 +1,7 @@
 # exl3xpu
 
+![Qwen3.8-27B EXL3 on one Intel Arc Pro B70](docs/banner/banner.png)
+
 EXL3 ([exllamav3](https://github.com/turboderp-org/exllamav3) trellis quantization) inference on Intel Arc
 Battlemage GPUs, as a vLLM plugin. Native ESIMD kernels decode the trellis bit-exactly and run the GEMMs
 on the Xe2 vector and XMX units; vLLM supplies scheduling, paged KV cache, the GDN/attention kernels and the
