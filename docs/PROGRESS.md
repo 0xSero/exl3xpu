@@ -145,3 +145,20 @@ V VNNI-transformed), 8 query rows/thread, 256-GRF, online softmax base 2. tests/
 Diagnosis: at head_dim 256 an 8-row fp32 O accumulator is 8 KB of the 16 KB GRF, so a thread cannot hold more
 query rows to reuse K/V tiles; ~8 FLOP/byte of L1 traffic per thread (x6 GQA heads re-reading the same tiles)
 puts ~100+ TFLOPS beyond Xe2 L1 bandwidth. 1000 tok/s at 256K needs ~117 TFLOPS attention: not credible on one B70.
+
+### Full sweep (2026-09-23, B70 #1 — B70 #0 was running the user's llama.cpp service)
+Config: models/qwen3.8-27b-exl3-4.00bpw/model.yaml (MTP k=3, pruned draft head, fp8 KV 267,761 tokens, 256K
+max len, max_num_seqs 16, image+video). Deterministic prompts (panel-v1), greedy. Aggregate tok/s (per-stream).
+
+| C | prose off | code off | prose think | code think |
+|---|---|---|---|---|
+| 1 | 47.2 (47.0) | 66.7 (66.3) | 61.4 (56.6) | 48.5 (47.7) |
+| 2 | 83.2 (42.7) | 119.8 (60.0) | 110.8 (54.1) | 82.7 (41.6) |
+| 4 | 138.6 (35.5) | 200.4 (50.0) | 175.6 (42.5) | 144.1 (35.0) |
+| 8 | 236.3 (30.5) | 345.3 (43.5) | 299.6 (37.9) | 234.1 (29.0) |
+| 16 | 180.7 (18.2) | 264.9 (22.9) | 240.5 (23.2) | 184.4 (18.1) |
+Prefill (cold): 4K 1589, 32K 1497, 128K 1049 tok/s. Vision + video tests pass. Audio: not supported by the model.
+
+C16 < C8 diagnosed: a C16 verify is M=64 tokens; the MB=64 DPAS kernel (1 tile/thread) took 124 ms for all
+linears vs 50.6 ms at M=32. Fixes measured (all linears, M=64): 2x MB=32 blocks 100 ms; MB=64 NT=1 256-GRF 105 ms;
+MB=64 NT=2 256-GRF 87.3 ms (kept, bit-exact); MB=32 NT=4 256-GRF regressed M=32 (60.4 vs 50.7, not kept).

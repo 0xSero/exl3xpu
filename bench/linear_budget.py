@@ -14,6 +14,8 @@ from exl3xpu import ops
 MODEL = os.environ.get("MODEL", "/models/turboderp-Qwen3.8-27B-exl3-4.00bpw")
 dev = torch.device("xpu:0")
 E = ops._get_esimd()
+if os.environ.get("MAXMB"):
+    E.exl3_set_max_mb(int(os.environ["MAXMB"]))
 if os.environ.get("LOCAL"):
     E.exl3_set_local(int(os.environ["LOCAL"]))
 if os.environ.get("VECMAX"):
