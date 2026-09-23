@@ -1,5 +1,5 @@
 """
-Banner for the README / sharing: Qwen3.8-27B EXL3 on one Intel Arc Pro B70 (Qwen mark: lobehub/icons qwen.svg).
+Banner for the README / sharing: Qwen3.8-27B EXL3 on one Intel Arc Pro B70 (logos: lobehub/icons qwen.svg, simple-icons intel.svg).
 The ridges ARE the measured sweep: each data ridge passes through the aggregate decode tok/s at C=1,2,4,8,16
 (models/qwen3.8-27b-exl3-4.00bpw/recipe.json); the layers between them are interpolated for the look.
 Usage: python3 docs/banner/make_banner.py && rsvg-convert docs/banner/banner.svg -o docs/banner/banner.png
@@ -93,15 +93,16 @@ for x, val, tag in ((XC[1], best1, "C1 DECODE"), (XC[2], best2, "C2 DECODE"), (X
                f'{val:,.0f}<tspan dx="6" font-size="19" font-weight="400" fill="#77736B">tok/s</tspan></text>')
     out.append(f'<text x="{x + 10}" y="{y - 18:.1f}" font-family="{FONT}" font-size="16" letter-spacing="2.5" fill="#8C877E">{tag}</text>')
 
-# ---- type: Qwen mark (monochrome, lobehub icons qwen.svg) + title, subtitle, url
+# ---- logos only: Qwen mark (lobehub/icons qwen.svg) | Intel wordmark (simple-icons intel.svg)
 import re
-logo = open(os.path.join(HERE, "qwen-logo.svg")).read()
-d = " ".join(re.findall(r'<path[^>]* d="([^"]+)"', logo))
-LS = 132 / 24.0
-out.append(f'<path transform="translate(124,112) scale({LS:.4f})" fill="#161512" fill-rule="evenodd" d="{d}"/>')
-out.append(f'<text x="{W - 128}" y="80" text-anchor="end" font-family="{FONT}" font-size="22" fill="#9A968D">github.com/0xSero/exl3xpu</text>')
-out.append(f'<text x="290" y="232" font-family="{FONT}" font-size="150" font-weight="500" letter-spacing="-5" fill="#161512">Qwen3.8-27B</text>')
-out.append(f'<text x="130" y="318" font-family="{FONT}" font-size="44" fill="#2A2824">1× Intel Arc Pro B70 · EXL3 4.0bpw</text>')
+def paths(f):
+    return " ".join(re.findall(r'<path[^>]* d="([^"]+)"', open(os.path.join(HERE, f)).read()))
+INK = "#161512"
+out.append(f'<path transform="translate(130,96) scale({170 / 24:.4f})" fill="{INK}" fill-rule="evenodd" d="{paths("qwen-logo.svg")}"/>')
+out.append(f'<line x1="358" y1="116" x2="358" y2="246" stroke="#C9C4BA" stroke-width="2"/>')
+# intel wordmark spans y 7.3..16.5 of its 24-unit box: scale so the glyphs are ~120 px tall, centred on the mark
+IS = 13.5
+out.append(f'<path transform="translate(400,{181 - 11.9 * IS:.1f}) scale({IS})" fill="{INK}" d="{paths("intel-logo.svg")}"/>')
 out.append("</svg>")
 open(os.path.join(HERE, "banner.svg"), "w").write("\n".join(out))
 print("wrote", os.path.join(HERE, "banner.svg"))
