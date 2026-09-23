@@ -440,6 +440,7 @@ struct DpasKernel {
     static ESIMD_INLINE void build_k4(simd<uint32_t, W>& dw, simd<uint32_t, W>& prev, simd<fp16, 256>& Bv) {
         simd<uint32_t, 32> lane(0, 1);
         simd<uint32_t, 32> q0 = lane & 1u, h = lane >> 4;
+        simd<uint32_t, W> prev2 = prev << 2u;                // hoisted: one shift per tile, not per group
 #pragma unroll
         for (int q1 = 0; q1 < 2; ++q1) {
             simd<uint32_t, 32> j = q0 + 2u * q1 + 4u * h;
@@ -450,9 +451,9 @@ struct DpasKernel {
                 simd<uint32_t, 32> cw, pw;
                 cw.template select<16, 1>(0) = dw.template replicate_vs_w_hs<8, 4, 2, 0>(m);
                 cw.template select<16, 1>(16) = cw.template select<16, 1>(0);
-                pw.template select<16, 1>(0) = prev.template replicate_vs_w_hs<8, 4, 2, 0>(m);
+                pw.template select<16, 1>(0) = prev2.template replicate_vs_w_hs<8, 4, 2, 0>(m);
                 pw.template select<16, 1>(16) = pw.template select<16, 1>(0);
-                simd<uint32_t, 32> st = (((pw << 2u) << sl) | (cw >> sr)) & 0xFFFFu;
+                simd<uint32_t, 32> st = ((pw << sl) | (cw >> sr)) & 0xFFFFu;
                 Bv.template select<32, 1>(32 * m + 128 * q1) = decode_cb_h<CB, 32>(st);
             }
         }

@@ -83,7 +83,10 @@ def main():
         *parents, leaf = key.split(".")
         for k in parents:
             node = node.setdefault(k, {})
-        node[leaf] = yaml.safe_load(val)
+        try:
+            node[leaf] = yaml.safe_load(val)
+        except yaml.YAMLError:
+            node[leaf] = val          # e.g. "{model_dir}/x.json" is not valid YAML; keep the raw string
     path = model_path(cfg, args.model_path)
 
     if not args.dp:

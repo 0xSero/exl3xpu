@@ -35,15 +35,23 @@ _uid = 0
 
 
 def unique_prompt(ctx_tokens: int, cls: str, rnd: random.Random) -> str:
-    """Unique cold prefix (random word document ~ctx_tokens) + a task that ends naturally."""
+    """Unique cold prefix (random-word document of ~ctx_tokens tokens, sized with the real tokenizer)
+    + a task that ends naturally."""
     global _uid
     _uid += 1
     tag = f"[doc {os.getpid()}-{_uid}-{rnd.random():.12f}]"
     body = ""
     if ctx_tokens > 0:
         w = words()
-        n = int(ctx_tokens / 1.9)  # ~1.9 tokens per random word (measured roughly)
-        body = tag + " " + " ".join(rnd.choice(w) for _ in range(n)) + "\n\nIgnore the noise document above.\n"
+        n = max(1, int(ctx_tokens / 3.5))       # first guess (random words ~3.5 tokens each)
+        doc = [rnd.choice(w) for _ in range(n)]
+        for _ in range(3):                      # rescale with the tokenizer to land within ~1%
+            got = count_tokens(" ".join(doc))
+            if abs(got - ctx_tokens) <= ctx_tokens * 0.01:
+                break
+            n = max(1, int(len(doc) * ctx_tokens / got))
+            doc = (doc + [rnd.choice(w) for _ in range(max(0, n - len(doc)))])[:n]
+        body = tag + " " + " ".join(doc) + "\n\nIgnore the noise document above.\n"
     topic = rnd.choice(TOPICS)
     if cls == "code":
         task = (f"{tag} Write a complete, well commented Python module implementing an LRU cache with TTL expiry, "
@@ -109,7 +117,8 @@ async def stream_one(session, url, model, prompt, max_tokens, temperature, think
     try:
         async with session.post(url, json=body) as r:
             if r.status != 200:
-                rec["error"] = f"HTTP {r.status}: {(await r.text())[:200]}"
+                rec["error"] = f"HTTP {r.status}: {(await r.text())[:300]}"
+                rec["t_end"] = time.time()
                 return rec
             async for raw in r.content:
                 line = raw.decode().strip()
@@ -247,6 +256,9 @@ async def prefill_cell(args, C, ctx):
         ptoks = sum(r.get("prompt_tokens") or 0 for r in recs)
         ttfts = sorted((r["times"][0] - r["t_send"]) for r in recs if r.get("times"))
         fails = sum(1 for r in recs if r.get("error") or not r.get("times"))
+        for r in recs:
+            if r.get("error"):
+                print("prefill request failed:", r["error"], flush=True)
         rows.append((ptoks, wall, ttfts, fails, GpuSampler.busy(g_a, g_b) if sampler.devs else []))
     # discard first wave (warm-up) when more than one
     use = rows[1:] if len(rows) > 1 else rows

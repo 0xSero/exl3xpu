@@ -81,3 +81,22 @@ this panel is ~2.4 (random prompts earlier gave 3.2-3.7, which made cross-run C1
 Eager per-step GPU budget (C1, k=3): 50 ms = EXL3 GEMV/DPAS 40.8 + Hadamards 3.1 (eager launches; ~1.2 under
 graphs) + GDN 1.6 + RMSNorm 1.5 + rest ~3. Same-GPU floors: vector M=1 32.5 ms full / 25.1 ms memory-only;
 DPAS M=4 35.1 ms full / 33.5 ms without decode (structural B-build + dpas chain ~8 ms over the memory floor).
+
+### Prefill, calibrated (2026-09-23)
+Prompt generator fixed: random-word documents are ~3.5 tokens/word (not 1.9), so earlier "32K"/"128K" cells were
+~58K/232K tokens. Prompts are now sized with the tokenizer (within 0.1%).
+
+| ctx | prefill tok/s | TTFT | notes |
+|---|---|---|---|
+| 4K | 1665 | 2.5 s | |
+| 32K | 1363 | 24 s | |
+| 128K | 760 | 168 s | attention-bound (XPU FA2, head_dim 256) |
+| 254K | 508 | 500 s | linears alone would allow ~1900 tok/s |
+
+| step | result | kept |
+|---|---|---|
+| TRITON_ATTN backend | 32K: 43 tok/s (vs 1363 FA2) | no |
+| DSpark block-7 draft (Qwen3DSparkModel arch fix) | C1 prose 30.3 @1.83, code 73.6 @4.48 (vs MTP 47.6 / 68.0) | no (prose headline) |
+| draft vocab 256/384/512 blocks | C1 prose 47.7 / 47.2 / 47.6 | 512 kept (flat) |
+| DPAS prev<<2 hoist | 35.23 vs 35.12 ms | no change |
+GPU is PL2-throttled during decode: act 2600 MHz of 2800 (power1_cap 230 W, profile base); needs root to change.
