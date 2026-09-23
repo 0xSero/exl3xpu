@@ -29,19 +29,26 @@
   "chat": true,
   "reasoning": true,
   "tools": "untested",
-  "vision": false
+  "vision": true,
+  "video": true,
+  "audio": false
  },
  "serving": {
-  "max_context_tokens": 32768,
-  "max_concurrency": 64,
-  "kv_cache_tokens": 161031,
+  "max_context_tokens": 262144,
+  "max_concurrency": 16,
+  "kv_cache_tokens": 267761,
   "weights_gib": 14.91,
-  "data_parallel_replicas": 1
+  "data_parallel_replicas": 1,
+  "kv_cache_dtype": "fp8",
+  "speculative": "mtp k=3 (EXL3 MTP head), pruned draft vocab 512 blocks"
  },
  "correctness": {
   "weights_bit_exact": "PASS: all 401 EXL3 tensors (25.6G weights) bit-identical to exllamav3 reconstruct on reconstruct/vector/DPAS paths (tests/test_bitexact_xpu.py)",
-  "logits_vs_exllamav3": "pending (tests/gateA3)",
-  "smoke": "'The capital of France is Paris, and 17 x 23 = 391.' (greedy, thinking off)"
+  "logits_vs_exllamav3": "PASS top-1 99.63%, KL 9.8e-5 (tests/gateA3)",
+  "smoke": "'The capital of France is Paris, and 17 x 23 = 391.' (greedy, thinking off)",
+  "vision": "PASS tests/test_vision.py",
+  "video": "PASS tests/test_video.py",
+  "needle_128k": "PASS 3/3 depths"
  },
  "speed_sweep": [
   {

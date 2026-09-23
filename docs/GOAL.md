@@ -5,8 +5,10 @@ Qwen/Qwen3.8-27B @1d4bf0f2 (the EXL3 repo ships neither). Engine: vLLM 0.26.1 XP
 One Intel Arc Pro B70 (32 GB). Loop does not stop until every gate below holds.
 
 ## Gate T (targets, one card, one config)
-T1. decode C=1 >= 50 tok/s per stream (prose, thinking off, temp 0, MTP on, cold unique prompt, 0 context)
-T2. cold prefill >= 1000 tok/s at every served context: 4K, 32K, 128K, 256K (unique prompts, TTFT-based)
+T1. decode C=1 >= 50 tok/s per stream, judged with THINKING ON (user decision 2026-09-23): report prose, code and
+    their average (MTP on, cold unique prompts, 0 context). Thinking-off cells stay reported.
+T2. cold prefill >= 1000 tok/s at 4K, 32K and 128K. 256K: one-card ceiling accepted by the user (~763 tok/s,
+    bounded by the XPU attention kernel at head_dim 256); reported, not gated.
 T3. max_model_len 262144 served on the one card, KV_FULL never fires at C=1 with a 256K prompt
 T4. C=2 and C=8 aggregate decode reported (and must not regress below the no-MTP DPAS numbers: 152 at C8)
 T5. vision: an image request is answered correctly (describe a synthetic test image with known content)

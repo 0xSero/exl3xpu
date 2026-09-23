@@ -20,18 +20,18 @@ vllm:
   dtype: float16
   max_model_len: 262144
   kv_cache_dtype: fp8
-  gpu_memory_utilization: 0.95
-  max_num_seqs: 8
+  gpu_memory_utilization: 0.965
+  max_num_seqs: 16
   max_num_batched_tokens: 8192
   trust_remote_code: true
   mamba_cache_mode: align
   speculative_config:
     method: qwen3_5_mtp
     num_speculative_tokens: 3
-  limit_mm_per_prompt: {image: 4, video: 0}
+  limit_mm_per_prompt: {image: 4, video: 1}
   compilation_config:
     cudagraph_mode: FULL_DECODE_ONLY
-    cudagraph_capture_sizes: [1, 2, 4, 8, 12, 16, 24, 32]
+    cudagraph_capture_sizes: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64]
 
 env:
   VLLM_XPU_ENABLE_XPU_GRAPH: "1"
