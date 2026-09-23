@@ -453,6 +453,90 @@
    "label": "v3-hi-on"
   },
   {
+   "kind": "decode",
+   "concurrency": 1,
+   "context_tokens": 32768,
+   "content_class": "prose",
+   "thinking": false,
+   "temperature": 0.0,
+   "cache_state": "cold-unique",
+   "decode_tok_s_total": 26.4,
+   "decode_tok_s_per_stream": 50.32,
+   "decode_tok_min_total": 1584,
+   "spec_accept_len": 2.458,
+   "ttft_ms_p50": 21449,
+   "output_tokens_mean": 792,
+   "window_seconds": 60.0,
+   "samples": 2,
+   "flags": [
+    "PREFILL_IN_WINDOW"
+   ],
+   "label": "ctx32k"
+  },
+  {
+   "kind": "decode",
+   "concurrency": 1,
+   "context_tokens": 32768,
+   "content_class": "code",
+   "thinking": false,
+   "temperature": 0.0,
+   "cache_state": "cold-unique",
+   "decode_tok_s_total": 34.13,
+   "decode_tok_s_per_stream": 71.84,
+   "decode_tok_min_total": 2048,
+   "spec_accept_len": 3.541,
+   "ttft_ms_p50": 34855,
+   "output_tokens_mean": 2048,
+   "window_seconds": 60.0,
+   "samples": 1,
+   "flags": [
+    "PREFILL_IN_WINDOW"
+   ],
+   "label": "ctx32k"
+  },
+  {
+   "kind": "decode",
+   "concurrency": 4,
+   "context_tokens": 32768,
+   "content_class": "prose",
+   "thinking": false,
+   "temperature": 0.0,
+   "cache_state": "cold-unique",
+   "decode_tok_s_total": 3.35,
+   "decode_tok_s_per_stream": 6.07,
+   "decode_tok_min_total": 201,
+   "spec_accept_len": 2.488,
+   "ttft_ms_p50": 39334,
+   "output_tokens_mean": 755,
+   "window_seconds": 60.0,
+   "samples": 7,
+   "flags": [
+    "PREFILL_BOUND"
+   ],
+   "label": "ctx32k-c4"
+  },
+  {
+   "kind": "decode",
+   "concurrency": 4,
+   "context_tokens": 32768,
+   "content_class": "code",
+   "thinking": false,
+   "temperature": 0.0,
+   "cache_state": "cold-unique",
+   "decode_tok_s_total": 1.57,
+   "decode_tok_s_per_stream": 19.33,
+   "decode_tok_min_total": 94,
+   "spec_accept_len": 3.437,
+   "ttft_ms_p50": 58704,
+   "output_tokens_mean": 2048,
+   "window_seconds": 60.0,
+   "samples": 5,
+   "flags": [
+    "PREFILL_BOUND"
+   ],
+   "label": "ctx32k-c4"
+  },
+  {
    "kind": "prefill",
    "concurrency": 1,
    "context_tokens": 4096,
@@ -672,6 +756,12 @@
     "linears_m4_ms": "35.1 -> 33.4",
     "c1_prose_think_off": "53.9 -> 56.6",
     "kept": true
+   },
+   {
+    "step": "max_num_batched_tokens 2048 / 4096 (vs 8192)",
+    "prefill_32k": "1497 -> 1407 / 1474",
+    "c4_32k": "unchanged (prefill-bound)",
+    "kept": false
    }
   ],
   "pending": [
@@ -680,6 +770,6 @@
    "3 measured waves + 95% LCB",
    "tool-call acceptance"
   ],
-  "notes": "C16 thinking-on cells are KV-bound: 267,761-token fp8 pool holds ~10 of 16 long-reasoning streams (flag KV_BOUND)."
+  "notes": "C16 thinking-on cells are KV-bound: 267,761-token fp8 pool holds ~10 of 16 long-reasoning streams (flag KV_BOUND). 32K-context cells: C1 per-stream decode 50.3 prose / 71.8 code (aggregate includes the ~21-35 s prefill, flag PREFILL_IN_WINDOW); C4 x 32K is prefill-bound (each stream re-prefills 32K per few hundred output tokens, TTFT 39-59 s; flag PREFILL_BOUND). Chunk size 2048/4096 does not change it."
  }
 }

@@ -212,3 +212,10 @@ linears 2 reps: M=3 31.9-32.0 -> 31.5-32.6, M=4 32.6-32.8 -> 32.0-32.1 ms (NT=4;
 M=4 is decode/memory-bound, not DPAS-bound. Rejected (left opt-in).
 mul1 codebook as two 16x16 multiplies (EXL3_MUL16): Gate A1 PASS but slower everywhere (2 reps): M=1 29.4 ->
 34.4, M=4 32.9 -> 39.4, M=16 36-38 -> 43.4, M=64 69.3 -> 78.0 ms. Rejected (left opt-in).
+
+### 32K-context decode cells (2026-09-23, B70 #1, v3 build)
+C1 x 32K: per-stream decode prose 50.3, code 71.8 tok/s (0-context: 56.6 / 79.2); aggregate 26.4 / 34.1 because
+the 21-35 s prefill falls in the 60 s window. C4 x 32K (150 s warm-up): aggregate 3.4 prose / 1.6 code, TTFT
+39-59 s: prefill-bound, every stream re-prefills a fresh 32K prompt per few hundred output tokens.
+max_num_batched_tokens 2048 / 4096 vs 8192: prefill 4K 1568 / 1666 vs 1589, 32K 1407 / 1474 vs 1497; C4 x 32K
+unchanged (2.8 / 13.2 and 2.7 / 1.5). Kept 8192. Cells recorded with PREFILL_IN_WINDOW / PREFILL_BOUND flags.
