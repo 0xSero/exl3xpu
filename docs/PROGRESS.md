@@ -227,3 +227,7 @@ GDN state (3.1 MiB/layer, padded 4 MiB) forces 2048-token attention blocks under
 allocates whole blocks. mamba_cache_mode default (drop align): C8/C16 prose 354.0/332.8, code 268.2/274.5
 (vs 355.2/327.0, 275.5/270.9): noise, same 10 running. enable_prefix_caching=false: 346.6/336.9, 268.9/267.7,
 same 10 running. Both rejected. Lever left: GDN state dtype (page size), needs a quality check (Gate A3).
+GDN state dtype: vLLM "auto" already stores the temporal state in the model dtype (fp16; config.json asks fp32),
+so the 3.1 MiB page is the fp16 size; lower would be fp8 state (quality risk). fp16 attention KV halves the block
+but also halves pool tokens (256K no longer fits). Conclusion: C16 thinking-on stays allocator-bound (KV_BOUND);
+C16 prose 327-337 vs C8 346-355.
