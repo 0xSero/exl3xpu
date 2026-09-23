@@ -170,3 +170,14 @@ llama.cpp engine was started on that card (our engine was at 91.5% VRAM). Repro 
 new MB64 (NT2, 256-GRF) 240.2 agg (23.3/stream, accept 2.27) with no errors; old MB64 197.3 (19.3/stream),
 also clean. Not a kernel bug; MB64 fix confirmed +22% on the cell. C16 still == C8 on think-on code: next is
 profiling the non-linear per-step cost at C16.
+
+### Split-K sizing retune (2026-09-23), kept
+C16 eager profile (25 verify steps): DPAS MB64 56 ms/step, GDN spec kernel 13.3, HadOut 9.2 (33 us/call vs
+HadIn 5 us), lm_head 4.2, FA2 2.8, draft ~3.8; ~97 ms GPU vs ~150 ms wall per step (rest is host).
+HadOut was slow because split-K was sized for 4096 threads: o_proj/out_proj/down at M=64 split K 26 ways
+(~34 MB of fp32 partials per call). All linears, graph-captured (bench/linear_budget.py), 4096 -> 1024 threads:
+M=1 36.1->32.5, M=2 38.5->33.5, M=4 41.4->35.7, M=16 49.3->39.1, M=32 54.4->50.6 ms (repeated, stable);
+M=64 best at 2048: 87.7->77.0 ms. New defaults 1024 / 2048 (MB=64); env EXL3_TARGET_THREADS(_MB64).
+Gate A1 PASS (401 tensors). Served, thinking on (agg tok/s, before -> after): C1 prose 61.4->68.6, code
+48.5->56.9; C8 prose 318.1->326.0, code 239.8->262.5; C16 prose 294.7->305.5, code 240.2->249.6.
+T1 now passes on both classes (code 56.9 >= 50).

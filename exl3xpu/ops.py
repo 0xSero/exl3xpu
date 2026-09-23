@@ -28,6 +28,11 @@ def _get_esimd():
                 @torch.library.register_fake("exl3xpu_C::linear")
                 def _linear_fake(x, trellis, suh, svh, shard_of_nb, group_bounds, K, cb, small_m_max, slice_n):
                     return x.new_empty((*x.shape[:-1], svh.shape[0]))
+            # split-K sizing overrides (defaults in csrc/exl3_ops.sycl are tuned on B70)
+            if os.environ.get("EXL3_TARGET_THREADS"):
+                _esimd.exl3_set_target_threads(int(os.environ["EXL3_TARGET_THREADS"]))
+            if os.environ.get("EXL3_TARGET_THREADS_MB64") and hasattr(_esimd, "exl3_set_target_threads_mb64"):
+                _esimd.exl3_set_target_threads_mb64(int(os.environ["EXL3_TARGET_THREADS_MB64"]))
         except Exception as e:  # noqa
             if _backend != "triton":
                 # never degrade silently to the ~5x slower Triton path; opt in with EXL3_BACKEND=triton
