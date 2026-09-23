@@ -145,6 +145,52 @@ def patch_fp8kv_prefill() -> bool:
     return True
 
 
+def patch_xpu_block_size() -> bool:
+    """Opt-in (EXL3_KV_BLOCK_EXACT=1): keep the hybrid-negotiated attention block size (a multiple of 64 for the
+    GDN kernel) instead of rounding it up to a power of two. On Qwen3.8 with fp8 KV the negotiation gives 1600
+    tokens (= the 3.1 MiB GDN state page); the XPU platform rounds that to 2048 and pads every page to 4 MiB,
+    wasting ~22% of the KV pool. The power-of-two rule exists for the ESIMD paged-attention decode fast path;
+    this model's decode/verify attention runs through FA2 varlen instead."""
+    import os
+    if os.environ.get("EXL3_KV_BLOCK_EXACT") != "1":
+        return False
+    try:
+        from vllm.platforms import xpu as xpu_mod
+        from vllm.platforms.interface import Platform
+    except Exception as e:  # noqa
+        logger.warning("exl3xpu: XPU platform not importable (%s); block-size patch skipped", e)
+        return False
+    cls = getattr(xpu_mod, "XPUPlatform", None)
+    if cls is None or getattr(cls, "_exl3_block_patched", False):
+        return False
+
+    def update_block_size_for_backend(klass, vllm_config) -> None:
+        Platform.update_block_size_for_backend.__func__(klass, vllm_config)
+        from vllm.config.vllm import get_layers_from_vllm_config
+        from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+        cc = vllm_config.cache_config
+        layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+        if not any(l.get_attn_backend().get_name() == "GDN_ATTN" for l in layers.values()):
+            return
+        bs = max(cc.block_size, 64)
+        new = (bs + 63) // 64 * 64
+        if new == cc.block_size:
+            logger.info("exl3xpu: keeping attention block size %d (multiple of 64, not rounded to a power of 2)", new)
+            return
+        if cc.mamba_cache_mode == "align":
+            cc.mamba_block_size = new
+        if cc.mamba_page_size_padded is not None:
+            cc.mamba_page_size_padded = new * (cc.mamba_page_size_padded // cc.block_size)
+        cc.block_size = new
+        logger.info("exl3xpu: attention block size %d (multiple of 64)", new)
+
+    cls.update_block_size_for_backend = classmethod(update_block_size_for_backend)
+    cls._exl3_block_patched = True
+    logger.info("exl3xpu: XPU block size keeps the hybrid negotiation (EXL3_KV_BLOCK_EXACT=1)")
+    return True
+
+
 def apply_all():
     patch_gdn_mask_index()
     patch_fp8kv_prefill()
+    patch_xpu_block_size()

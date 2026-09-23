@@ -308,3 +308,16 @@ DPAS M=24) PASS. Default on (EXL3_NO_DPAS_MB24 opts out). Affects C5-C6 with MTP
 33..48 rows used to pad to MB=64. New MB=40/48 (256-GRF, NT=2, split-K target 2048): all linears (2 reps) M=33
 59.4-60.0 -> 56.8-57.0, M=40 61.7-62.2 -> 58.3-58.7, M=44 62.8-63.4 -> 60.0-60.6, M=48 64.1-64.4 -> 61.5-61.6 ms.
 Extended Gate A1 (incl. DPAS M=40/48) PASS. Default on (EXL3_NO_DPAS_MB48 opts out).
+
+### Interleaved serving (bench/interleave.py, 2026-09-23, B70 #1, thinking on)
+4 background streams; arrivals cycling 1K/8K/32K prompts. Baseline (no arrivals): 265.8 tok/s total, 66.4/stream,
+max token gap 0.35 s. Arrivals every 10 s (~1400 tok/s prefill demand, ~100% of prefill capacity): 23.1 tok/s,
+max gap 7.1 s -- overloaded. Arrivals every 30 s, by max_num_batched_tokens (prefill chunk):
+| chunk | bg decode tok/s | max gap | p99 gap | TTFT 1K / 8K / 32K |
+| 8192 | 180.3 | 7.09 s | 53 ms | 0.92 / 5.32 / 24.4 s |
+| 4096 | engine DEVICE_LOST (xe job timeout in decode graph replay) | | | |
+| 2048 | 172.2 | 1.95 s | 66 ms | 0.92 / 5.70 / 26.2 s |
+| 1024 | 162.4 | 1.08 s | 726 ms | 1.22 / 6.35 / 29.4 s |
+| 512 | 140.2 | 0.70 s | 588 ms | 10.8 / 8.0 / 38.3 s |
+2048 is the balance (freeze 7.1 -> 1.95 s for -4% decode, -7% 32K TTFT). The DEVICE_LOST hung inside XPU graph
+replay (5 s xe job timeout), like the earlier C16 crash; repro + 2048 soak running.
