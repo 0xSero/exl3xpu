@@ -31,6 +31,8 @@ def _get_esimd():
             # split-K sizing overrides (defaults in csrc/exl3_ops.sycl are tuned on B70)
             if os.environ.get("EXL3_TARGET_THREADS"):
                 _esimd.exl3_set_target_threads(int(os.environ["EXL3_TARGET_THREADS"]))
+            if os.environ.get("EXL3_TARGET_THREADS_MB16") and hasattr(_esimd, "exl3_set_target_threads_mb16"):
+                _esimd.exl3_set_target_threads_mb16(int(os.environ["EXL3_TARGET_THREADS_MB16"]))
             if os.environ.get("EXL3_TARGET_THREADS_MB64") and hasattr(_esimd, "exl3_set_target_threads_mb64"):
                 _esimd.exl3_set_target_threads_mb64(int(os.environ["EXL3_TARGET_THREADS_MB64"]))
         except Exception as e:  # noqa

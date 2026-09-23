@@ -120,7 +120,8 @@ static int g_vec_max_m = 2;   // vector kernel for M<=2, DPAS (flat cost up to M
 // Split-K sizing: threads to aim for when choosing the number of K splits. Measured on B70 (all linears,
 // graph-captured): 1024 beats 4096 by 10-20% for M=1..32 (fewer fp32 partials for had_out to reduce, and the
 // 256-GRF DPAS kernels only hold ~1024 resident threads); MB=64 prefers 2048 (77 vs 88 ms).
-static int g_target_threads = 1024;
+static int g_target_threads = 1024;          // vector GEMV (M<=2) and DPAS MB=32
+static int g_target_threads_mb16 = 1408;     // DPAS MB=8/16: plateau 1280-1536 (M=4 35.1->32.2 ms, M=16 38.7->36.0), cliff at 1664
 static int g_target_threads_mb64 = 2048;
 
 // Column-strip width (tiles per thread) per case, from bench sweeps on B70:
@@ -220,7 +221,8 @@ void exl3_gemm_small(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Tenso
     int tk = Kdim / 16;
     int n_strips = (N / 16) / (use_vec ? nt_for(K, MR) : dpas_nt(MB));
     int units = n_strips * m_blocks;
-    int target = (!use_vec && MB >= 64) ? g_target_threads_mb64 : g_target_threads;
+    int target = use_vec ? g_target_threads
+               : (MB <= 16 ? g_target_threads_mb16 : (MB >= 64 ? g_target_threads_mb64 : g_target_threads));
     int P = std::max(1, std::min(tk, (target + units - 1) / units));
     int rps = (tk + P - 1) / P;
     P = (tk + rps - 1) / rps;
@@ -406,6 +408,7 @@ bool exl3_supported(int64_t K, int64_t cb) {
 
 void exl3_set_target_threads(int64_t n) { g_target_threads = (int)n; }
 void exl3_set_target_threads_mb64(int64_t n) { g_target_threads_mb64 = (int)n; }
+void exl3_set_target_threads_mb16(int64_t n) { g_target_threads_mb16 = (int)n; }
 void exl3_set_vec_max_m(int64_t n) { g_vec_max_m = (int)n; }
 
 TORCH_LIBRARY(exl3xpu_C, m) {
@@ -424,6 +427,7 @@ TORCH_LIBRARY(exl3xpu_C, m) {
     m.impl("exl3_gemm_raw", torch::kXPU, &exl3_gemm_raw);
     m.def("exl3_set_target_threads(int n) -> ()", &exl3_set_target_threads);
     m.def("exl3_set_target_threads_mb64(int n) -> ()", &exl3_set_target_threads_mb64);
+    m.def("exl3_set_target_threads_mb16(int n) -> ()", &exl3_set_target_threads_mb16);
     m.def("exl3_set_vec_max_m(int n) -> ()", &exl3_set_vec_max_m);
     m.def("exl3_set_fused(int on) -> ()", &exl3_set_fused);
     m.def("exl3_set_local(int n) -> ()", &exl3_set_local);

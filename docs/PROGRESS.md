@@ -188,3 +188,10 @@ M=4 35.4 -> 35.2, M=16 39.0 -> 37.8, M=64 76.8 -> 67.7 ms. Gate A1 PASS. Double-
 DpasKernel (EXL3_DPAS_PREFETCH): M=16 39.0 -> 86.4 ms (register spill), M=64 76.8 -> 79.2: rejected.
 Served (B70 #1, think off, agg tok/s, full-v2 -> prev-from-regs): C1 prose 53.9 -> 53.7, code 75.3 -> 75.9;
 C8 prose 253.8 -> 265.4, code 371.4 -> 390.0; C16 prose 241.5 -> 262.7, code 349.0 -> 374.5. Kept.
+
+### DPAS MB<=16 split-K target 1408 (2026-09-23)
+Target-thread sweep for DPAS MB=8/16 (all linears, graph-captured, B70 #1): 1024: M=4 35.1, M=16 38.7 ms;
+1280-1536 plateau: M=4 32.1-32.3, M=16 36.0-36.2; 1664+: 36.4 / 41.3 (cliff); 2048: 38.6 / 44.4. MB=32 stays
+at 1024 (47.6 vs 49.6 at 1536); MB=64 flat 1408-2048 (67.9-68.6), stays 2048. Vector kernel at M=3/4
+(VECMAX=4): 45.7 / 44.6 ms vs DPAS 35: rejected. New default MB<=16 1408 (env EXL3_TARGET_THREADS_MB16).
+Gate A1 PASS. After: M=1 29.4, M=4 33.4, M=16 36.2, M=32 47.9, M=64 69.3 ms.
