@@ -13,20 +13,21 @@ static sycl::queue& queue_of(const at::Tensor& t) {
 static int round_up(int a, int b) { return (a + b - 1) / b * b; }
 
 template <typename TIn>
-static void launch_had_in(const at::Tensor& x, const at::Tensor& suh, at::Tensor& xh, sycl::queue& q) {
+static void launch_had_in(const at::Tensor& x, const at::Tensor& suh, at::Tensor& xh, sycl::queue& q,
+                          bool row_major = false) {
     int M = x.size(0), Kdim = x.size(1), S = suh.size(0), Mp = xh.size(1);
     int n = S * M * (Kdim / 128);
     HadInKernel<TIn> k{reinterpret_cast<const TIn*>(x.data_ptr()), reinterpret_cast<const fp16*>(suh.data_ptr()),
-                       reinterpret_cast<fp16*>(xh.data_ptr()), M, Kdim, S, (int)x.stride(0), Mp};
+                       reinterpret_cast<fp16*>(xh.data_ptr()), M, Kdim, S, (int)x.stride(0), Mp, row_major ? 1 : 0};
     int local = 8;
     q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
 }
 
-template <typename TOut>
+template <typename TOut, typename TPart = float>
 static void launch_had_out(const at::Tensor& part, int P, const at::Tensor& svh, at::Tensor& out, sycl::queue& q) {
     int M = out.size(0), N = out.size(1);
     int n = M * (N / 128);
-    HadOutKernel<TOut> k{part.data_ptr<float>(), reinterpret_cast<const fp16*>(svh.data_ptr()),
+    HadOutKernel<TOut, TPart> k{reinterpret_cast<const TPart*>(part.data_ptr()), reinterpret_cast<const fp16*>(svh.data_ptr()),
                          reinterpret_cast<TOut*>(out.data_ptr()), M, N, P, (int)out.stride(0)};
     int local = 8;
     q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
@@ -199,6 +200,23 @@ at::Tensor exl3_gemm_raw(at::Tensor xh_blocked, at::Tensor trellis, at::Tensor s
     return part.sum(0);
 }
 
+// Prefill helpers: row-major input Hadamard (GEMM operand) and fp16 output Hadamard.
+void exl3_had_in_rm(at::Tensor x, at::Tensor suh, at::Tensor xh) {
+    TORCH_CHECK(xh.scalar_type() == at::kHalf && xh.is_contiguous() && xh.size(1) == x.size(0));
+    auto& q = queue_of(x);
+    if (x.scalar_type() == at::kHalf) launch_had_in<fp16>(x, suh, xh, q, true);
+    else if (x.scalar_type() == at::kBFloat16) launch_had_in<sycl::ext::oneapi::bfloat16>(x, suh, xh, q, true);
+    else TORCH_CHECK(false, "x dtype");
+}
+
+void exl3_had_out_h(at::Tensor y, at::Tensor svh, at::Tensor out) {
+    TORCH_CHECK(y.scalar_type() == at::kHalf && y.is_contiguous() && y.sizes() == out.sizes());
+    auto& q = queue_of(y);
+    if (out.scalar_type() == at::kHalf) launch_had_out<fp16, fp16>(y, 1, svh, out, q);
+    else if (out.scalar_type() == at::kBFloat16) launch_had_out<sycl::ext::oneapi::bfloat16, fp16>(y, 1, svh, out, q);
+    else TORCH_CHECK(false, "out dtype");
+}
+
 bool exl3_supported(int64_t K, int64_t cb) {
     if (cb == 2 && (K == 4 || K == 6)) return true;
 #ifdef EXL3_ALL_CODEBOOKS
@@ -215,6 +233,10 @@ TORCH_LIBRARY(exl3xpu_C, m) {
     m.def("exl3_gemm_small(Tensor x, Tensor trellis, Tensor suh, Tensor svh, Tensor shard_of_nb, Tensor(a!) out, int K, int cb) -> ()");
     m.impl("exl3_gemm_small", torch::kXPU, &exl3_gemm_small);
     m.def("exl3_supported(int K, int cb) -> bool", &exl3_supported);
+    m.def("exl3_had_in_rm(Tensor x, Tensor suh, Tensor(a!) xh) -> ()");
+    m.impl("exl3_had_in_rm", torch::kXPU, &exl3_had_in_rm);
+    m.def("exl3_had_out_h(Tensor y, Tensor svh, Tensor(a!) out) -> ()");
+    m.impl("exl3_had_out_h", torch::kXPU, &exl3_had_out_h);
     m.def("exl3_reconstruct(Tensor trellis, Tensor(a!) w, int n0, int K, int cb) -> ()");
     m.impl("exl3_reconstruct", torch::kXPU, &exl3_reconstruct);
     m.def("exl3_gemm_raw(Tensor xh_blocked, Tensor trellis, Tensor shard_of_nb, int N, int K, int cb, int path) -> Tensor");

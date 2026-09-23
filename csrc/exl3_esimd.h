@@ -139,6 +139,7 @@ template <typename TIn>
 struct HadInKernel {
     const TIn* x; const fp16* suh; fp16* xh;
     int M, Kdim, S, x_stride, Mp;   // Mp: padded row count of the blocked xh layout
+    int row_major;                  // 1: plain [S][M][Kdim] output (prefill GEMM operand)
     void operator()(sycl::nd_item<1> it) const SYCL_ESIMD_KERNEL {
         int id = it.get_global_id(0);
         int kb_n = Kdim / 128;
@@ -153,8 +154,12 @@ struct HadInKernel {
         v = convert<float>(convert<fp16>(v));
         fwht128(v);
         v *= kRsqrt128;
-        // blocked layout xh[g][k/16][m][16]: a tile-row's A block for all M rows is contiguous
         simd<fp16, 128> vh = convert<fp16>(v);
+        if (row_major) {
+            block_store<fp16, 128>(xh + ((size_t)g * M + m) * Kdim + kb * 128, vh);
+            return;
+        }
+        // blocked layout xh[g][k/16][m][16]: a tile-row's A block for all M rows is contiguous
         int kt = Kdim / 16;
 #pragma unroll
         for (int i = 0; i < 8; ++i)
@@ -165,9 +170,9 @@ struct HadInKernel {
 // ------------------------------------------------------------------------------------------------
 // had_out: out[m, nb*128:+128] = svh * H(sum_p part[p, m, :]) / sqrt(128)
 
-template <typename TOut>
+template <typename TOut, typename TPart = float>
 struct HadOutKernel {
-    const float* part; const fp16* svh; TOut* out;
+    const TPart* part; const fp16* svh; TOut* out;
     int M, N, P, out_stride;
     void operator()(sycl::nd_item<1> it) const SYCL_ESIMD_KERNEL {
         int id = it.get_global_id(0);
@@ -177,7 +182,7 @@ struct HadOutKernel {
         if (m >= M) return;
         simd<float, 128> v = 0.0f;
         for (int p = 0; p < P; ++p)
-            v += block_load<float, 128>(part + ((size_t)p * M + m) * N + nb * 128);
+            v += convert<float>(block_load<TPart, 128>(part + ((size_t)p * M + m) * N + nb * 128));
         fwht128(v);
         simd<fp16, 128> sv = block_load<fp16, 128>(svh + nb * 128);
         v = v * kRsqrt128 * convert<float>(sv);

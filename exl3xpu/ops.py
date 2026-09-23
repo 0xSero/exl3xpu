@@ -66,7 +66,12 @@ def exl3_linear_impl(x: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, 
         return out.view(*shape[:-1], n)
 
     # Large M: reconstruct Hadamard-domain fp16 weights slice by slice, oneDNN GEMM, output Hadamard
-    xh = tk.had_in(x2, suh)                              # [G, M, k] fp16
+    fast = esimd and hasattr(esimd, "exl3_had_in_rm")
+    if fast:
+        xh = torch.empty((suh.shape[0], M, k), dtype=torch.float16, device=x.device)
+        esimd.exl3_had_in_rm(x2, suh, xh)
+    else:
+        xh = tk.had_in(x2, suh)                          # [G, M, k] fp16
     y = torch.empty((M, n), dtype=torch.float16, device=x.device)
     for g in range(len(group_bounds) - 1):
         g0, g1 = group_bounds[g], group_bounds[g + 1]
@@ -78,7 +83,10 @@ def exl3_linear_impl(x: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, 
             else:
                 tk.reconstruct(trellis, K, cb, n0, n1 - n0, out=w)
             torch.matmul(xh[g], w, out=y[:, n0:n1])
-    tk.had_out(y, svh, out)
+    if fast:
+        esimd.exl3_had_out_h(y, svh, out)
+    else:
+        tk.had_out(y, svh, out)
     return out.view(*shape[:-1], n)
 
 
