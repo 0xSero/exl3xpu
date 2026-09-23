@@ -1,5 +1,5 @@
 """
-Banner for the README / sharing: Qwen3.8-27B EXL3 on one Intel Arc Pro B70.
+Banner for the README / sharing: Qwen3.8-27B EXL3 on one Intel Arc Pro B70 (Qwen mark: lobehub/icons qwen.svg).
 The ridges ARE the measured sweep: each data ridge passes through the aggregate decode tok/s at C=1,2,4,8,16
 (models/qwen3.8-27b-exl3-4.00bpw/recipe.json); the layers between them are interpolated for the look.
 Usage: python3 docs/banner/make_banner.py && rsvg-convert docs/banner/banner.svg -o docs/banner/banner.png
@@ -82,60 +82,26 @@ for i, (vals, is_data) in enumerate(layers):
     if is_data:
         data_ridges.append((vals, pts, f))
 
-# ---- Intel Arc Pro B70 in pure white (blower card, side view), floating right
-cx, cy, cw, ch = 1330, 88, 500, 158
-g = [f'<g filter="url(#sh)">']
-g.append(f'<rect x="{cx}" y="{cy}" width="{cw}" height="{ch}" rx="16" fill="#FFFFFF"/>')
-# PCIe bracket (left) + screw tab
-g.append(f'<rect x="{cx - 20}" y="{cy - 6}" width="14" height="{ch + 44}" rx="3" fill="#FFFFFF"/>')
-g.append(f'<rect x="{cx - 34}" y="{cy - 6}" width="30" height="12" rx="3" fill="#FFFFFF"/>')
-# PCIe edge connector (bottom)
-g.append(f'<rect x="{cx + 70}" y="{cy + ch - 2}" width="250" height="20" rx="2" fill="#FFFFFF"/>')
-g.append(f'<rect x="{cx + 128}" y="{cy + ch - 2}" width="6" height="20" fill="{BG}"/>')
-# exhaust vents on the bracket
-for k in range(7):
-    g.append(f'<rect x="{cx - 17}" y="{cy + 14 + k * 20}" width="8" height="12" rx="2" fill="#F1EEE7"/>')
-g.append("</g>")
-out += g
-# shroud details (still white, drawn with faint strokes)
-st = 'stroke="#E6E2D9" stroke-width="2"'
-nf = 'fill="none" ' + st
-out.append(f'<rect x="{cx + 14}" y="{cy + 14}" width="{cw - 28}" height="{ch - 28}" rx="10" {nf}/>')
-fx, fy, fr = cx + cw - 104, cy + ch / 2, 55
-out.append(f'<circle cx="{fx}" cy="{fy}" r="{fr + 8}" fill="#FFFFFF" {st}/>')
-out.append(f'<circle cx="{fx}" cy="{fy}" r="{fr}" {nf}/>')
-for k in range(15):
-    a = 2 * math.pi * k / 15
-    x1, y1 = fx + 16 * math.cos(a), fy + 16 * math.sin(a)
-    x2, y2 = fx + (fr - 4) * math.cos(a + 0.55), fy + (fr - 4) * math.sin(a + 0.55)
-    out.append(f'<path d="M{x1:.1f},{y1:.1f} Q{fx + 44 * math.cos(a + 0.15):.1f},{fy + 44 * math.sin(a + 0.15):.1f} {x2:.1f},{y2:.1f}" {nf}/>')
-out.append(f'<circle cx="{fx}" cy="{fy}" r="14" fill="#FFFFFF" {st}/>')
-for k in range(9):
-    y = cy + 34 + k * 13.5
-    out.append(f'<line x1="{cx + 40}" y1="{y:.1f}" x2="{cx + cw - 205}" y2="{y:.1f}" stroke="#EEEBE4" stroke-width="2"/>')
-out.append(f'<text x="{cx + 40}" y="{cy + ch - 26}" font-family="{FONT}" font-size="17" letter-spacing="3" fill="#CFCAC0">ARC PRO B70 · 32 GB</text>')
-
-# ---- speed labels: one per concurrency column, on the top ridge (best class at that C)
+# ---- three labels on the top ridge: C1 decode, C2 decode, prefill (placed on the C8 peak)
 top_vals, top_pts, _ = data_ridges[0]
-for c in CS:
-    x = XC[c]
+best1 = max(series[k][1] for k in series); best2 = max(series[k][2] for k in series)
+for x, val, tag in ((XC[1], best1, "C1 DECODE"), (XC[2], best2, "C2 DECODE"), (XC[8], pre[4096], "PREFILL")):
     y = min(top_pts, key=lambda p: abs(p[0] - x))[1]
-    best = max(series, key=lambda k: series[k][c])
     out.append(f'<line x1="{x}" y1="{y - 6:.1f}" x2="{x}" y2="{y - 38:.1f}" stroke="#B9B4AA" stroke-width="1.5"/>')
     out.append(f'<circle cx="{x}" cy="{y:.1f}" r="4" fill="#161512"/>')
-    out.append(f'<text x="{x + 10}" y="{y - 46:.1f}" font-family="{FONT}" font-size="34" font-weight="500" fill="#161512">'
-               f'{series[best][c]:.0f}<tspan dx="5" font-size="17" font-weight="400" fill="#77736B"> tok/s</tspan></text>')
-    out.append(f'<text x="{x + 10}" y="{y - 20:.1f}" font-family="{FONT}" font-size="15" letter-spacing="2" fill="#8C877E">'
-               f'C{c} · {best[0].upper()}{" · THINK" if best[1] else ""}</text>')
-out.append(f'<text x="{W - 40}" y="{H - 22}" text-anchor="end" font-family="{FONT}" font-size="17" '
-           f'fill="rgba(255,255,255,0.62)">ridges = measured aggregate decode tok/s, C1 to C16, prose/code × thinking on/off · MTP k=3 · one card</text>')
+    out.append(f'<text x="{x + 10}" y="{y - 46:.1f}" font-family="{FONT}" font-size="40" font-weight="500" fill="#161512">'
+               f'{val:,.0f}<tspan dx="6" font-size="19" font-weight="400" fill="#77736B">tok/s</tspan></text>')
+    out.append(f'<text x="{x + 10}" y="{y - 18:.1f}" font-family="{FONT}" font-size="16" letter-spacing="2.5" fill="#8C877E">{tag}</text>')
 
-# ---- type
-out.append(f'<text x="{W - 128}" y="50" text-anchor="end" font-family="{FONT}" font-size="22" fill="#9A968D">github.com/0xSero/exl3xpu</text>')
-out.append(f'<text x="124" y="232" font-family="{FONT}" font-size="150" font-weight="500" letter-spacing="-5" fill="#161512">Qwen3.8-27B</text>')
-out.append(f'<text x="130" y="306" font-family="{FONT}" font-size="44" fill="#2A2824">1× Intel Arc Pro B70 · EXL3 4.0bpw</text>')
-out.append(f'<text x="130" y="352" font-family="{FONT}" font-size="27" fill="#77736B">'
-           f'C1 {series[("code", False)][1]:.0f} tok/s · prefill {pre[4096]:,.0f} tok/s · 256K context · vision · bit-exact kernels</text>')
+# ---- type: Qwen mark (monochrome, lobehub icons qwen.svg) + title, subtitle, url
+import re
+logo = open(os.path.join(HERE, "qwen-logo.svg")).read()
+d = " ".join(re.findall(r'<path[^>]* d="([^"]+)"', logo))
+LS = 132 / 24.0
+out.append(f'<path transform="translate(124,112) scale({LS:.4f})" fill="#161512" fill-rule="evenodd" d="{d}"/>')
+out.append(f'<text x="{W - 128}" y="80" text-anchor="end" font-family="{FONT}" font-size="22" fill="#9A968D">github.com/0xSero/exl3xpu</text>')
+out.append(f'<text x="290" y="232" font-family="{FONT}" font-size="150" font-weight="500" letter-spacing="-5" fill="#161512">Qwen3.8-27B</text>')
+out.append(f'<text x="130" y="318" font-family="{FONT}" font-size="44" fill="#2A2824">1× Intel Arc Pro B70 · EXL3 4.0bpw</text>')
 out.append("</svg>")
 open(os.path.join(HERE, "banner.svg"), "w").write("\n".join(out))
 print("wrote", os.path.join(HERE, "banner.svg"))

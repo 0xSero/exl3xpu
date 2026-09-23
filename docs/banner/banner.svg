@@ -34,72 +34,20 @@
 <path d="M-60.0,679 L-60.0,625.9 L-54.7,626.2 L-48.9,626.5 L-42.6,626.9 L-35.7,627.3 L-28.4,627.8 L-20.6,628.2 L-12.4,628.7 L-3.7,629.0 L5.4,629.4 L14.9,629.6 L24.8,629.8 L35.0,629.9 L45.6,629.9 L56.5,629.7 L67.7,629.4 L79.3,628.9 L91.1,628.2 L103.1,627.4 L115.4,626.5 L128.0,625.4 L140.7,624.1 L153.6,622.7 L166.7,621.2 L180.0,619.6 L193.6,617.9 L207.7,616.2 L222.3,614.4 L237.4,612.7 L252.9,611.1 L268.8,609.6 L285.0,608.2 L301.5,607.1 L318.3,606.2 L335.3,605.6 L352.6,605.2 L370.0,605.1 L387.6,605.2 L405.2,605.5 L423.0,605.9 L440.7,606.4 L458.5,607.0 L476.2,607.6 L493.9,608.1 L511.5,608.5 L528.9,608.7 L546.2,608.8 L563.2,608.7 L580.0,608.5 L596.7,608.1 L613.3,607.5 L630.0,606.8 L646.7,605.9 L663.3,605.0 L680.0,604.0 L696.7,603.0 L713.3,602.0 L730.0,601.1 L746.7,600.3 L763.3,599.6 L780.0,599.0 L796.7,598.6 L813.3,598.5 L830.0,598.5 L846.7,598.7 L863.3,599.1 L880.0,599.6 L896.7,600.3 L913.3,601.0 L930.0,601.8 L946.7,602.6 L963.3,603.4 L980.0,604.0 L996.7,604.4 L1013.3,604.6 L1030.0,604.5 L1046.7,604.0 L1063.3,603.3 L1080.0,602.2 L1096.7,600.7 L1113.3,598.9 L1130.0,596.9 L1146.7,594.5 L1163.3,591.9 L1180.0,589.1 L1196.7,586.2 L1213.3,583.1 L1230.0,580.1 L1246.7,577.0 L1263.3,574.1 L1280.0,571.3 L1296.7,568.6 L1313.3,566.3 L1330.0,564.1 L1346.7,562.3 L1363.3,560.8 L1380.0,559.6 L1396.8,558.7 L1413.7,558.1 L1430.8,557.8 L1448.1,557.7 L1465.4,557.7 L1482.8,557.9 L1500.3,558.1 L1517.8,558.3 L1535.3,558.5 L1552.7,558.5 L1570.2,558.5 L1587.5,558.2 L1604.7,557.8 L1621.8,557.2 L1638.8,556.4 L1655.6,555.5 L1672.1,554.4 L1688.4,553.2 L1704.5,551.9 L1720.3,550.6 L1735.7,549.3 L1750.9,548.0 L1765.6,546.7 L1780.0,545.5 L1794.2,544.5 L1808.4,543.5 L1822.7,542.7 L1836.9,542.1 L1851.0,541.7 L1865.0,541.5 L1878.9,541.5 L1892.6,541.6 L1906.1,542.0 L1919.4,542.5 L1932.3,543.2 L1945.0,543.9 L1957.3,544.8 L1969.3,545.7 L1980.8,546.6 L1991.9,547.6 L2002.4,548.5 L2012.5,549.5 L2022.0,550.3 L2030.9,551.2 L2039.2,551.9 L2046.9,552.6 L2053.8,553.2 L2060.0,558.7 L2060.0,679 Z" fill="rgb(53,51,48)" stroke="rgba(0,0,0,0.07)" stroke-width="1"/>
 <path d="M-60.0,679 L-60.0,630.6 L-54.7,630.7 L-48.9,630.9 L-42.6,631.1 L-35.7,631.3 L-28.4,631.6 L-20.6,631.8 L-12.4,631.9 L-3.7,632.0 L5.4,632.1 L14.9,632.0 L24.8,631.9 L35.0,631.7 L45.6,631.4 L56.5,631.0 L67.7,630.5 L79.3,629.9 L91.1,629.2 L103.1,628.5 L115.4,627.7 L128.0,626.9 L140.7,626.1 L153.6,625.3 L166.7,624.5 L180.0,623.7 L193.6,622.9 L207.7,622.3 L222.3,621.8 L237.4,621.4 L252.9,621.3 L268.8,621.3 L285.0,621.6 L301.5,622.0 L318.3,622.6 L335.3,623.4 L352.6,624.3 L370.0,625.3 L387.6,626.3 L405.2,627.2 L423.0,628.1 L440.7,628.8 L458.5,629.4 L476.2,629.8 L493.9,629.9 L511.5,629.9 L528.9,629.7 L546.2,629.3 L563.2,628.7 L580.0,628.1 L596.7,627.4 L613.3,626.7 L630.0,626.0 L646.7,625.3 L663.3,624.7 L680.0,624.2 L696.7,623.9 L713.3,623.7 L730.0,623.7 L746.7,624.0 L763.3,624.4 L780.0,625.0 L796.7,625.8 L813.3,626.7 L830.0,627.7 L846.7,628.8 L863.3,629.9 L880.0,631.0 L896.7,632.0 L913.3,632.9 L930.0,633.5 L946.7,634.0 L963.3,634.2 L980.0,634.1 L996.7,633.7 L1013.3,632.9 L1030.0,631.8 L1046.7,630.3 L1063.3,628.4 L1080.0,626.3 L1096.7,623.9 L1113.3,621.3 L1130.0,618.6 L1146.7,615.7 L1163.3,612.9 L1180.0,610.0 L1196.7,607.2 L1213.3,604.5 L1230.0,602.0 L1246.7,599.7 L1263.3,597.6 L1280.0,595.8 L1296.7,594.2 L1313.3,592.9 L1330.0,591.9 L1346.7,591.1 L1363.3,590.5 L1380.0,590.1 L1396.8,589.8 L1413.7,589.7 L1430.8,589.6 L1448.1,589.5 L1465.4,589.4 L1482.8,589.2 L1500.3,588.9 L1517.8,588.4 L1535.3,587.7 L1552.7,586.9 L1570.2,585.9 L1587.5,584.8 L1604.7,583.5 L1621.8,582.2 L1638.8,580.9 L1655.6,579.6 L1672.1,578.4 L1688.4,577.2 L1704.5,576.2 L1720.3,575.4 L1735.7,574.7 L1750.9,574.3 L1765.6,574.0 L1780.0,573.9 L1794.2,574.0 L1808.4,574.3 L1822.7,574.8 L1836.9,575.5 L1851.0,576.4 L1865.0,577.4 L1878.9,578.6 L1892.6,579.9 L1906.1,581.2 L1919.4,582.6 L1932.3,584.0 L1945.0,585.3 L1957.3,586.6 L1969.3,587.8 L1980.8,589.0 L1991.9,590.0 L2002.4,591.0 L2012.5,591.8 L2022.0,592.5 L2030.9,593.2 L2039.2,593.7 L2046.9,594.1 L2053.8,594.5 L2060.0,592.0 L2060.0,679 Z" fill="rgb(44,42,39)" stroke="rgba(0,0,0,0.07)" stroke-width="1"/>
 <path d="M-60.0,679 L-60.0,630.5 L-54.7,630.5 L-48.9,630.6 L-42.6,630.7 L-35.7,630.8 L-28.4,630.9 L-20.6,631.0 L-12.4,631.1 L-3.7,631.2 L5.4,631.2 L14.9,631.3 L24.8,631.4 L35.0,631.4 L45.6,631.5 L56.5,631.5 L67.7,631.6 L79.3,631.7 L91.1,631.8 L103.1,632.0 L115.4,632.3 L128.0,632.6 L140.7,633.0 L153.6,633.5 L166.7,634.0 L180.0,634.7 L193.6,635.4 L207.7,636.3 L222.3,637.2 L237.4,638.3 L252.9,639.6 L268.8,640.9 L285.0,642.3 L301.5,643.7 L318.3,645.1 L335.3,646.4 L352.6,647.6 L370.0,648.6 L387.6,649.5 L405.2,650.1 L423.0,650.5 L440.7,650.6 L458.5,650.6 L476.2,650.3 L493.9,649.9 L511.5,649.4 L528.9,648.8 L546.2,648.2 L563.2,647.6 L580.0,647.2 L596.7,646.8 L613.3,646.6 L630.0,646.5 L646.7,646.7 L663.3,647.0 L680.0,647.5 L696.7,648.2 L713.3,649.1 L730.0,650.1 L746.7,651.3 L763.3,652.5 L780.0,653.8 L796.7,655.1 L813.3,656.3 L830.0,657.4 L846.7,658.3 L863.3,659.1 L880.0,659.6 L896.7,659.8 L913.3,659.7 L930.0,659.4 L946.7,658.7 L963.3,657.6 L980.0,656.3 L996.7,654.7 L1013.3,652.8 L1030.0,650.7 L1046.7,648.4 L1063.3,646.0 L1080.0,643.5 L1096.7,641.0 L1113.3,638.5 L1130.0,636.1 L1146.7,633.8 L1163.3,631.7 L1180.0,629.8 L1196.7,628.1 L1213.3,626.7 L1230.0,625.4 L1246.7,624.4 L1263.3,623.6 L1280.0,623.0 L1296.7,622.6 L1313.3,622.2 L1330.0,622.0 L1346.7,621.8 L1363.3,621.6 L1380.0,621.4 L1396.8,621.2 L1413.7,620.8 L1430.8,620.3 L1448.1,619.7 L1465.4,618.9 L1482.8,617.9 L1500.3,616.8 L1517.8,615.6 L1535.3,614.3 L1552.7,612.9 L1570.2,611.6 L1587.5,610.3 L1604.7,609.1 L1621.8,608.1 L1638.8,607.2 L1655.6,606.6 L1672.1,606.3 L1688.4,606.2 L1704.5,606.4 L1720.3,606.8 L1735.7,607.5 L1750.9,608.4 L1765.6,609.4 L1780.0,610.6 L1794.2,611.9 L1808.4,613.4 L1822.7,614.9 L1836.9,616.6 L1851.0,618.2 L1865.0,619.9 L1878.9,621.5 L1892.6,623.1 L1906.1,624.6 L1919.4,625.9 L1932.3,627.2 L1945.0,628.2 L1957.3,629.2 L1969.3,630.0 L1980.8,630.6 L1991.9,631.2 L2002.4,631.6 L2012.5,631.9 L2022.0,632.1 L2030.9,632.2 L2039.2,632.3 L2046.9,632.3 L2053.8,632.3 L2060.0,625.2 L2060.0,679 Z" fill="rgb(36,34,31)" stroke="rgba(0,0,0,0.07)" stroke-width="1"/>
-<g filter="url(#sh)">
-<rect x="1330" y="88" width="500" height="158" rx="16" fill="#FFFFFF"/>
-<rect x="1310" y="82" width="14" height="202" rx="3" fill="#FFFFFF"/>
-<rect x="1296" y="82" width="30" height="12" rx="3" fill="#FFFFFF"/>
-<rect x="1400" y="244" width="250" height="20" rx="2" fill="#FFFFFF"/>
-<rect x="1458" y="244" width="6" height="20" fill="#F9F7F1"/>
-<rect x="1313" y="102" width="8" height="12" rx="2" fill="#F1EEE7"/>
-<rect x="1313" y="122" width="8" height="12" rx="2" fill="#F1EEE7"/>
-<rect x="1313" y="142" width="8" height="12" rx="2" fill="#F1EEE7"/>
-<rect x="1313" y="162" width="8" height="12" rx="2" fill="#F1EEE7"/>
-<rect x="1313" y="182" width="8" height="12" rx="2" fill="#F1EEE7"/>
-<rect x="1313" y="202" width="8" height="12" rx="2" fill="#F1EEE7"/>
-<rect x="1313" y="222" width="8" height="12" rx="2" fill="#F1EEE7"/>
-</g>
-<rect x="1344" y="102" width="472" height="130" rx="10" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<circle cx="1726" cy="167.0" r="63" fill="#FFFFFF" stroke="#E6E2D9" stroke-width="2"/>
-<circle cx="1726" cy="167.0" r="55" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1742.0,167.0 Q1769.5,173.6 1769.5,193.7" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1740.6,173.5 Q1763.1,190.7 1754.9,209.0" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1736.7,178.9 Q1750.2,203.7 1735.3,217.1" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1730.9,182.2 Q1733.2,210.4 1714.1,216.6" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1724.3,182.9 Q1714.9,209.6 1694.9,207.5" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1718.0,180.9 Q1698.6,201.4 1681.2,191.3" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1713.1,176.4 Q1686.9,187.3 1675.2,171.0" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1710.3,170.3 Q1682.1,169.6 1677.9,150.0" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1710.3,163.7 Q1684.8,151.5 1689.0,131.9" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1713.1,157.6 Q1694.7,136.1 1706.5,119.9" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1718.0,153.1 Q1709.9,126.0 1727.3,116.0" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1724.3,151.1 Q1728.0,123.0 1748.0,121.0" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1730.9,151.8 Q1745.7,127.7 1764.8,133.9" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1736.7,155.1 Q1760.0,139.1 1774.9,152.5" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<path d="M1740.6,160.5 Q1768.4,155.3 1776.6,173.7" fill="none" stroke="#E6E2D9" stroke-width="2"/>
-<circle cx="1726" cy="167.0" r="14" fill="#FFFFFF" stroke="#E6E2D9" stroke-width="2"/>
-<line x1="1370" y1="122.0" x2="1625" y2="122.0" stroke="#EEEBE4" stroke-width="2"/>
-<line x1="1370" y1="135.5" x2="1625" y2="135.5" stroke="#EEEBE4" stroke-width="2"/>
-<line x1="1370" y1="149.0" x2="1625" y2="149.0" stroke="#EEEBE4" stroke-width="2"/>
-<line x1="1370" y1="162.5" x2="1625" y2="162.5" stroke="#EEEBE4" stroke-width="2"/>
-<line x1="1370" y1="176.0" x2="1625" y2="176.0" stroke="#EEEBE4" stroke-width="2"/>
-<line x1="1370" y1="189.5" x2="1625" y2="189.5" stroke="#EEEBE4" stroke-width="2"/>
-<line x1="1370" y1="203.0" x2="1625" y2="203.0" stroke="#EEEBE4" stroke-width="2"/>
-<line x1="1370" y1="216.5" x2="1625" y2="216.5" stroke="#EEEBE4" stroke-width="2"/>
-<line x1="1370" y1="230.0" x2="1625" y2="230.0" stroke="#EEEBE4" stroke-width="2"/>
-<text x="1370" y="220" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="17" letter-spacing="3" fill="#CFCAC0">ARC PRO B70 · 32 GB</text>
 <line x1="180" y1="547.5" x2="180" y2="515.5" stroke="#B9B4AA" stroke-width="1.5"/>
 <circle cx="180" cy="553.5" r="4" fill="#161512"/>
-<text x="190" y="507.5" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="34" font-weight="500" fill="#161512">67<tspan dx="5" font-size="17" font-weight="400" fill="#77736B"> tok/s</tspan></text>
-<text x="190" y="533.5" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="15" letter-spacing="2" fill="#8C877E">C1 · CODE</text>
+<text x="190" y="507.5" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="40" font-weight="500" fill="#161512">67<tspan dx="6" font-size="19" font-weight="400" fill="#77736B">tok/s</tspan></text>
+<text x="190" y="535.5" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="16" letter-spacing="2.5" fill="#8C877E">C1 DECODE</text>
 <line x1="580" y1="506.6" x2="580" y2="474.6" stroke="#B9B4AA" stroke-width="1.5"/>
 <circle cx="580" cy="512.6" r="4" fill="#161512"/>
-<text x="590" y="466.6" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="34" font-weight="500" fill="#161512">120<tspan dx="5" font-size="17" font-weight="400" fill="#77736B"> tok/s</tspan></text>
-<text x="590" y="492.6" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="15" letter-spacing="2" fill="#8C877E">C2 · CODE</text>
-<line x1="980" y1="452.2" x2="980" y2="420.2" stroke="#B9B4AA" stroke-width="1.5"/>
-<circle cx="980" cy="458.2" r="4" fill="#161512"/>
-<text x="990" y="412.2" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="34" font-weight="500" fill="#161512">200<tspan dx="5" font-size="17" font-weight="400" fill="#77736B"> tok/s</tspan></text>
-<text x="990" y="438.2" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="15" letter-spacing="2" fill="#8C877E">C4 · CODE</text>
+<text x="590" y="466.6" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="40" font-weight="500" fill="#161512">120<tspan dx="6" font-size="19" font-weight="400" fill="#77736B">tok/s</tspan></text>
+<text x="590" y="494.6" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="16" letter-spacing="2.5" fill="#8C877E">C2 DECODE</text>
 <line x1="1380" y1="339.1" x2="1380" y2="307.1" stroke="#B9B4AA" stroke-width="1.5"/>
 <circle cx="1380" cy="345.1" r="4" fill="#161512"/>
-<text x="1390" y="299.1" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="34" font-weight="500" fill="#161512">344<tspan dx="5" font-size="17" font-weight="400" fill="#77736B"> tok/s</tspan></text>
-<text x="1390" y="325.1" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="15" letter-spacing="2" fill="#8C877E">C8 · CODE</text>
-<line x1="1780" y1="343.5" x2="1780" y2="311.5" stroke="#B9B4AA" stroke-width="1.5"/>
-<circle cx="1780" cy="349.5" r="4" fill="#161512"/>
-<text x="1790" y="303.5" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="34" font-weight="500" fill="#161512">333<tspan dx="5" font-size="17" font-weight="400" fill="#77736B"> tok/s</tspan></text>
-<text x="1790" y="329.5" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="15" letter-spacing="2" fill="#8C877E">C16 · CODE</text>
-<text x="1960" y="647" text-anchor="end" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="17" fill="rgba(255,255,255,0.62)">ridges = measured aggregate decode tok/s, C1 to C16, prose/code × thinking on/off · MTP k=3 · one card</text>
-<text x="1872" y="50" text-anchor="end" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="22" fill="#9A968D">github.com/0xSero/exl3xpu</text>
-<text x="124" y="232" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="150" font-weight="500" letter-spacing="-5" fill="#161512">Qwen3.8-27B</text>
-<text x="130" y="306" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="44" fill="#2A2824">1× Intel Arc Pro B70 · EXL3 4.0bpw</text>
-<text x="130" y="352" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="27" fill="#77736B">C1 67 tok/s · prefill 1,589 tok/s · 256K context · vision · bit-exact kernels</text>
+<text x="1390" y="299.1" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="40" font-weight="500" fill="#161512">1,589<tspan dx="6" font-size="19" font-weight="400" fill="#77736B">tok/s</tspan></text>
+<text x="1390" y="327.1" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="16" letter-spacing="2.5" fill="#8C877E">PREFILL</text>
+<path transform="translate(124,112) scale(5.5000)" fill="#161512" fill-rule="evenodd" d="M12.604 1.34c.393.69.784 1.382 1.174 2.075a.18.18 0 00.157.091h5.552c.174 0 .322.11.446.327l1.454 2.57c.19.337.24.478.024.837-.26.43-.513.864-.76 1.3l-.367.658c-.106.196-.223.28-.04.512l2.652 4.637c.172.301.111.494-.043.77-.437.785-.882 1.564-1.335 2.34-.159.272-.352.375-.68.37-.777-.016-1.552-.01-2.327.016a.099.099 0 00-.081.05 575.097 575.097 0 01-2.705 4.74c-.169.293-.38.363-.725.364-.997.003-2.002.004-3.017.002a.537.537 0 01-.465-.271l-1.335-2.323a.09.09 0 00-.083-.049H4.982c-.285.03-.553-.001-.805-.092l-1.603-2.77a.543.543 0 01-.002-.54l1.207-2.12a.198.198 0 000-.197 550.951 550.951 0 01-1.875-3.272l-.79-1.395c-.16-.31-.173-.496.095-.965.465-.813.927-1.625 1.387-2.436.132-.234.304-.334.584-.335a338.3 338.3 0 012.589-.001.124.124 0 00.107-.063l2.806-4.895a.488.488 0 01.422-.246c.524-.001 1.053 0 1.583-.006L11.704 1c.341-.003.724.032.9.34zm-3.432.403a.06.06 0 00-.052.03L6.254 6.788a.157.157 0 01-.135.078H3.253c-.056 0-.07.025-.041.074l5.81 10.156c.025.042.013.062-.034.063l-2.795.015a.218.218 0 00-.2.116l-1.32 2.31c-.044.078-.021.118.068.118l5.716.008c.046 0 .08.02.104.061l1.403 2.454c.046.081.092.082.139 0l5.006-8.76.783-1.382a.055.055 0 01.096 0l1.424 2.53a.122.122 0 00.107.062l2.763-.02a.04.04 0 00.035-.02.041.041 0 000-.04l-2.9-5.086a.108.108 0 010-.113l.293-.507 1.12-1.977c.024-.041.012-.062-.035-.062H9.2c-.059 0-.073-.026-.043-.077l1.434-2.505a.107.107 0 000-.114L9.225 1.774a.06.06 0 00-.053-.031zm6.29 8.02c.046 0 .058.02.034.06l-.832 1.465-2.613 4.585a.056.056 0 01-.05.029.058.058 0 01-.05-.029L8.498 9.841c-.02-.034-.01-.052.028-.054l.216-.012 6.722-.012z"/>
+<text x="1872" y="80" text-anchor="end" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="22" fill="#9A968D">github.com/0xSero/exl3xpu</text>
+<text x="290" y="232" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="150" font-weight="500" letter-spacing="-5" fill="#161512">Qwen3.8-27B</text>
+<text x="130" y="318" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="44" fill="#2A2824">1× Intel Arc Pro B70 · EXL3 4.0bpw</text>
 </svg>
