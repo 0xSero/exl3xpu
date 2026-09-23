@@ -100,6 +100,12 @@ static bool dispatch_dpas(int MB, const at::Tensor& xh, const at::Tensor& tr, co
 #ifndef EXL3_DPAS8_NT
 #define EXL3_DPAS8_NT 4
 #endif
+#ifndef EXL3_DPAS4_NT
+#define EXL3_DPAS4_NT 4
+#endif
+#ifdef EXL3_DPAS_MB4
+        case 4:  launch_dpas<K, CB, 4, EXL3_DPAS4_NT>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
+#endif
         case 8:  launch_dpas<K, CB, 8, EXL3_DPAS8_NT>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
         case 16: launch_dpas<K, CB, 16, 4>(xh, tr, shard, part, M, Kdim, N, P, rps, q); return true;
 #ifndef EXL3_DPAS32_NT
@@ -114,7 +120,7 @@ static bool dispatch_dpas(int MB, const at::Tensor& xh, const at::Tensor& tr, co
     return false;
 }
 
-static int dpas_nt(int MB) { return MB == 8 ? EXL3_DPAS8_NT : (MB <= 16 ? 4 : (MB == 32 ? EXL3_DPAS32_NT : EXL3_DPAS64_NT)); }
+static int dpas_nt(int MB) { return MB == 4 ? EXL3_DPAS4_NT : MB == 8 ? EXL3_DPAS8_NT : (MB <= 16 ? 4 : (MB == 32 ? EXL3_DPAS32_NT : EXL3_DPAS64_NT)); }
 static int g_vec_max_m = 2;   // vector kernel for M<=2, DPAS (flat cost up to M=8) above
 
 // Split-K sizing: threads to aim for when choosing the number of K splits. Measured on B70 (all linears,
@@ -207,7 +213,11 @@ void exl3_gemm_small(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Tenso
     }
     bool use_vec = M <= g_vec_max_m;
     int MR = M <= 1 ? 1 : (M <= 2 ? 2 : (M <= 4 ? 4 : 8));
+#ifdef EXL3_DPAS_MB4
+    int MB = M <= 4 ? 4 : (M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 32 ? 32 : 64)));
+#else
     int MB = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 32 ? 32 : 64));
+#endif
     if (MB > g_max_mb) MB = g_max_mb;
     int m_blocks = use_vec ? 1 : (M + MB - 1) / MB;
     int Mp = use_vec ? M : m_blocks * MB;
@@ -291,7 +301,11 @@ at::Tensor exl3_gemm_raw(at::Tensor xh_blocked, at::Tensor trellis, at::Tensor s
         if (Mp != M) xh_blocked = at::constant_pad_nd(xh_blocked, {0, 0, 0, Mp - M}).contiguous();
     }
     int MR = M <= 1 ? 1 : (M <= 2 ? 2 : (M <= 4 ? 4 : 8));
+#ifdef EXL3_DPAS_MB4
+    int MB = M <= 4 ? 4 : (M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 32 ? 32 : 64)));
+#else
     int MB = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 32 ? 32 : 64));
+#endif
     int tk = Kdim / 16;
     int P = 4, rps = (tk + P - 1) / P; P = (tk + rps - 1) / rps;
     auto part = at::zeros({P, M, N}, xh_blocked.options().dtype(at::kFloat));

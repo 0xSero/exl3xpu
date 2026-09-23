@@ -538,11 +538,13 @@ struct DpasKernel {
                 simd<fp16, 256> Bv;
                 if constexpr (K == 4) build_k4(dw, dwprev, Bv);
                 else build<0>(dw, dwprev, Bv);
+                // DPAS repeat count RC rows per instruction: 8, or MB itself for MB=4 (no zero-row work)
+                constexpr int RC = MB < 8 ? MB : 8;
 #pragma unroll
-                for (int rb = 0; rb < MB / 8; ++rb) {
-                    auto c = acc.template select<128, 1>((j * MB + rb * 8) * 16);
-                    c = xmx::dpas<8, 8, float, float, fp16, fp16>(
-                        simd<float, 128>(c), Bv, simd<fp16, 128>(Am.template select<128, 1>(rb * 128)));
+                for (int rb = 0; rb < MB / RC; ++rb) {
+                    auto c = acc.template select<RC * 16, 1>((j * MB + rb * RC) * 16);
+                    c = xmx::dpas<8, RC, float, float, fp16, fp16>(
+                        simd<float, RC * 16>(c), Bv, simd<fp16, RC * 16>(Am.template select<RC * 16, 1>(rb * RC * 16)));
                 }
             }
         }

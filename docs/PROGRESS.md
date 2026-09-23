@@ -205,3 +205,8 @@ NT=2 41.9-42.1 / 42.7-43.1; NT=8 49.9-50.0 / 51.4-52.3. Rejected (NT=4 stays).
 Async scheduling at C8/C16 (think off, confirmed enabled in the engine log): C8 prose 268.3 -> 268.9, code
 389.1 -> 389.9; C16 prose 265.9 -> 261.1, code 378.0 -> 372.1. No gain: rejected. The ~48 ms/step gap vs the
 eager-mode GPU sum is not overlappable host work; next C16 step is a graph-mode profile to re-derive it.
+FULL_AND_PIECEWISE (drafter graphs), sizes [1,2,4,8,16,32,48,64]: UR OUT_OF_RESOURCES at capture_begin of the
+2nd PIECEWISE size (Level Zero graph-resource limit; piecewise splits 64 layers into many subgraphs). Rejected.
+DPAS MB=4 (repeat count 4, opt-in EXL3_DPAS_MB4): outputs bitwise identical to MB=8 (24 layer/M cases), all
+linears 2 reps: M=3 31.9-32.0 -> 31.5-32.6, M=4 32.6-32.8 -> 32.0-32.1 ms (NT=4; NT=8 no better). Within noise:
+M=4 is decode/memory-bound, not DPAS-bound. Rejected (left opt-in).
