@@ -198,3 +198,7 @@ Gate A1 PASS. After: M=1 29.4, M=4 33.4, M=16 36.2, M=32 47.9, M=64 69.3 ms.
 Served (B70 #1, agg tok/s, full-v2 -> MB<=16 1408 + prev-from-regs): think off C1 prose 53.9 -> 56.6, code
 75.3 -> 79.2; C2 97.3 -> 104.2 / 137.6 -> 147.7; C4 170.7 -> 184.3 / 240.1 -> 254.7. Think on C1 prose
 64.5 -> 70.3, code 54.3 -> 58.3; C2 122.5 -> 122.7 / 97.8 -> 106.2; C4 223.0 -> 237.5 / 173.0 -> 187.0. Kept.
+Decode-cost probe (EXL3_DEBUG_NODECODE / NOSTATE builds): inconclusive, codegen changes dominate (M=1 29.2 ->
+94.9 ms with decode removed); not a usable bound.
+DPAS MB=8 tiles/thread (EXL3_DPAS8_NT), all linears, 2 reps: NT=4 (current) M=4 31.7-31.8, M=8 33.1-33.2 ms;
+NT=2 41.9-42.1 / 42.7-43.1; NT=8 49.9-50.0 / 51.4-52.3. Rejected (NT=4 stays).
