@@ -100,12 +100,70 @@ static bool dispatch_mr(int MR, const at::Tensor& xh, const at::Tensor& tr, cons
     return false;
 }
 
+// ---- fused single-kernel path (M <= 8, fp16 in/out): input Hadamard + GEMM + split-K + output Hadamard
+static at::Tensor& fused_counters(const at::Device& dev) {
+    static std::vector<at::Tensor> bufs(16);
+    auto& b = bufs.at(dev.index());
+    if (!b.defined()) b = at::zeros({1 << 16}, at::TensorOptions().dtype(at::kInt).device(dev));
+    return b;
+}
+
+template <typename KernelT>
+static void launch_fused(KernelT k, int n, sycl::queue& q) {
+    int local = 8;
+    q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
+}
+
+template <int K, int CB>
+static bool fused_small(const at::Tensor& x, const at::Tensor& tr, const at::Tensor& suh, const at::Tensor& svh,
+                        const at::Tensor& shard, at::Tensor& out, int M, int Kdim, int N, sycl::queue& q) {
+    int tk = Kdim / 16, tiles_n = N / 16;
+    bool vec = M <= g_vec_max_m;
+    int NT = vec ? (M <= 1 ? nt_of(K, 1) : nt_of(K, 2)) : dpas_nt(8);
+    int n_strips = tiles_n / NT;
+    int P = std::max(1, std::min(tk / 8, (g_target_threads + n_strips - 1) / n_strips));
+    int rps = ((tk + P - 1) / P + 7) / 8 * 8;             // multiple of 8 tile-rows (one Hadamard block)
+    P = (tk + rps - 1) / rps;
+    auto part = at::empty({P, M, N}, x.options().dtype(at::kFloat));
+    FusedArgs fa{reinterpret_cast<const fp16*>(x.data_ptr()), (int)x.stride(0),
+                 reinterpret_cast<const fp16*>(suh.data_ptr()), reinterpret_cast<const fp16*>(svh.data_ptr()),
+                 reinterpret_cast<fp16*>(out.data_ptr()), (int)out.stride(0),
+                 reinterpret_cast<uint32_t*>(fused_counters(x.device()).data_ptr())};
+    const uint32_t* trp = reinterpret_cast<const uint32_t*>(tr.data_ptr());
+    const int* shp = shard.data_ptr<int>();
+    float* pp = part.data_ptr<float>();
+    int n = n_strips * P;
+    if (vec) {
+        if (M <= 1) {
+            GemvKernel<K, CB, 1, nt_of(K, 1), true> k{nullptr, trp, shp, pp, M, Kdim, N, tiles_n, rps, n_strips, fa, P};
+            launch_fused(k, n, q);
+        } else {
+            GemvKernel<K, CB, 2, nt_of(K, 2), true> k{nullptr, trp, shp, pp, M, Kdim, N, tiles_n, rps, n_strips, fa, P};
+            launch_fused(k, n, q);
+        }
+    } else {
+        DpasKernel<K, CB, 8, EXL3_DPAS8_NT, true> k{nullptr, trp, shp, pp, M, Kdim, N, tiles_n, rps, n_strips, 1, 8, fa, P};
+        launch_fused(k, n, q);
+    }
+    return true;
+}
+
+static bool g_fused = false;   // measured slower under XPU graphs (serialized split-K tail); opt in via exl3_set_fused
+void exl3_set_fused(int64_t on) { g_fused = on != 0; }
+
 void exl3_gemm_small(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Tensor svh, at::Tensor shard_of_nb,
                      at::Tensor out, int64_t K, int64_t cb) {
     TORCH_CHECK(x.dim() == 2 && x.stride(1) == 1, "x must be 2D row-major");
     TORCH_CHECK(trellis.scalar_type() == at::kShort && trellis.is_contiguous());
     auto& q = queue_of(x);
     int M = x.size(0), Kdim = x.size(1), N = svh.size(0), S = suh.size(0);
+    if (g_fused && M <= 8 && x.scalar_type() == at::kHalf && out.scalar_type() == at::kHalf && out.stride(1) == 1 &&
+        N / 128 <= (1 << 16)) {
+        bool done = false;
+        if (K == 4 && cb == 2) done = fused_small<4, 2>(x, trellis, suh, svh, shard_of_nb, out, M, Kdim, N, q);
+        else if (K == 6 && cb == 2) done = fused_small<6, 2>(x, trellis, suh, svh, shard_of_nb, out, M, Kdim, N, q);
+        if (done) return;
+    }
     bool use_vec = M <= g_vec_max_m;
     int MR = M <= 1 ? 1 : (M <= 2 ? 2 : (M <= 4 ? 4 : 8));
     int MB = M <= 8 ? 8 : (M <= 16 ? 16 : (M <= 32 ? 32 : 64));
@@ -305,4 +363,5 @@ TORCH_LIBRARY(exl3xpu_C, m) {
     m.impl("exl3_gemm_raw", torch::kXPU, &exl3_gemm_raw);
     m.def("exl3_set_target_threads(int n) -> ()", &exl3_set_target_threads);
     m.def("exl3_set_vec_max_m(int n) -> ()", &exl3_set_vec_max_m);
+    m.def("exl3_set_fused(int on) -> ()", &exl3_set_fused);
 }

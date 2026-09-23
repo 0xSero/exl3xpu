@@ -58,3 +58,26 @@ Prefill (linears of one 8192-token chunk):
 |---|---|---|---|
 | Triton Hadamards | 7.71 s | 1063 tok/s | |
 | ESIMD row-major Hadamards | 4.31 s | 1902 tok/s | yes (GEMM ~140 TFLOPS, had 11%) |
+
+### C1 decode investigation (2026-09-23, one B70, MTP k=3, deterministic prompt panel from here on)
+The sweep now uses a fixed prompt sequence (`--seed panel-v1`) and records per-cell MTP acceptance
+(vLLM /metrics deltas). Per-step time = acceptance_len / tok_s is the engine metric; prose acceptance on
+this panel is ~2.4 (random prompts earlier gave 3.2-3.7, which made cross-run C1 comparisons noisy).
+
+| step | C1 prose | ms/step | kept |
+|---|---|---|---|
+| baseline (pruned head, new kernels) | 47.4 @3.23* | – | |
+| async scheduling | 45.8 | – | no (already default-on) |
+| FULL_AND_PIECEWISE graphs (drafter captured), sizes<=32 | – | – | no: UR OUT_OF_RESOURCES |
+| same, sizes [1,2,4,8] | 46.0 | – | no gain |
+| C++ single-op linear (host 74 -> 34 us/call) | 47.4 | – | yes (cleaner, no loss) |
+| GDN metadata sync patch (A/B on fixed panel) | 47.1 @2.41 vs 46.3 @2.38 | 51.1 vs 51.4 | yes (~1%) |
+| DPAS K=4 contiguous-VNNI B build | M=4 linears 35.1 vs 36.2 ms | | yes (bit-exact) |
+| DPAS natural-order decode / strided fp16 mad | 37.0 / 49.2 ms | | no |
+| fused single-kernel linear (had_in + split-K last-arriver + had_out) | M=1 34.7 vs 32.5, M=4 45.2 vs 35.1 | | no (serialized tail; hads cost only ~1.2 ms/step under graphs) |
+| lm_head verify on vector path (M=4) | 4.41 vs 3.57 ms DPAS | | no |
+(*random-prompt acceptance)
+
+Eager per-step GPU budget (C1, k=3): 50 ms = EXL3 GEMV/DPAS 40.8 + Hadamards 3.1 (eager launches; ~1.2 under
+graphs) + GDN 1.6 + RMSNorm 1.5 + rest ~3. Same-GPU floors: vector M=1 32.5 ms full / 25.1 ms memory-only;
+DPAS M=4 35.1 ms full / 33.5 ms without decode (structural B-build + dpas chain ~8 ms over the memory floor).

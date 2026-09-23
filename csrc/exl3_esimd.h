@@ -133,6 +133,63 @@ ESIMD_INLINE void fwht128(simd<float, 128>& v) {
 constexpr float kRsqrt128 = 0.08838834764831845f;
 
 // ------------------------------------------------------------------------------------------------
+// Fusion helpers (single-kernel linear for small M):
+//  - input Hadamard computed per thread for its own 128-row k block, bit-identical to HadInKernel
+//  - split-K reduction + output Hadamard by the last-arriving thread of each 128-column block
+
+struct FusedArgs {
+    const fp16* x; int x_stride;       // [M, Kdim] row-major fp16 activations
+    const fp16* suh;                   // [S, Kdim]
+    const fp16* svh;                   // [N]
+    fp16* out; int out_stride;         // [M, N] fp16
+    uint32_t* counters;                // [N/128], zero on entry, left zero on exit
+};
+
+// xblk[m*128 + i] = fp16( H(fp16(x[m, kb*128 + .] * suh[shard, .])) / sqrt(128) )[i]
+template <int MROWS>
+ESIMD_INLINE void fused_had_in(const FusedArgs& fa, int M, int Kdim, int shard, int kb, simd<fp16, MROWS * 128>& xblk) {
+    simd<float, 128> su = convert<float>(block_load<fp16, 128>(fa.suh + (size_t)shard * Kdim + kb * 128));
+#pragma unroll
+    for (int m = 0; m < MROWS; ++m) {
+        if (m < M) {
+            simd<float, 128> v = convert<float>(block_load<fp16, 128>(fa.x + (size_t)m * fa.x_stride + kb * 128)) * su;
+            v = convert<float>(convert<fp16>(v));
+            fwht128(v);
+            v *= kRsqrt128;
+            xblk.template select<128, 1>(m * 128) = convert<fp16>(v);
+        } else {
+            xblk.template select<128, 1>(m * 128) = 0;
+        }
+    }
+}
+
+// Called by every thread after writing its partials for columns [col0, col0 + ncols) of split p.
+// The thread that completes a 128-column block (arrivals == P * 128/ncols) reduces it.
+ESIMD_INLINE void fused_had_out(const FusedArgs& fa, const float* part, int M, int N, int P, int col0, int ncols) {
+    fence<memory_kind::global, fence_flush_op::none, fence_scope::gpu>();
+    int nb = col0 / 128;
+    uint32_t target = (uint32_t)(P * (128 / ncols));
+    simd<uint32_t, 1> off(nb * (uint32_t)sizeof(uint32_t));
+    simd<uint32_t, 1> old = atomic_update<atomic_op::inc, uint32_t, 1>(fa.counters, off);
+    if (old[0] != target - 1) return;
+    fence<memory_kind::global, fence_flush_op::none, fence_scope::gpu>();
+    atomic_update<atomic_op::store, uint32_t, 1>(fa.counters, off, simd<uint32_t, 1>(0u));
+    simd<float, 128> sv = convert<float>(block_load<fp16, 128>(fa.svh + nb * 128)) * kRsqrt128;
+    for (int m = 0; m < M; ++m) {
+        simd<float, 128> v = 0.0f;
+        for (int pp = 0; pp < P; ++pp) {
+            // L1 is not coherent across Xe cores: read other threads' partials past it (LSC max 64 x d32)
+            const float* src = part + ((size_t)pp * M + m) * N + nb * 128;
+            constexpr auto props = properties{cache_hint_L1<cache_hint::uncached>, cache_hint_L2<cache_hint::cached>};
+            v.template select<64, 1>(0) += block_load<float, 64>(src, props);
+            v.template select<64, 1>(64) += block_load<float, 64>(src + 64, props);
+        }
+        fwht128(v);
+        block_store<fp16, 128>(fa.out + (size_t)m * fa.out_stride + nb * 128, convert<fp16>(v * sv));
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
 // had_in: xh[g, m, :] = fp16( H(x[m, :] * suh[g, :]) / sqrt(128) ), one thread per (g, m, 128-block)
 
 template <typename TIn>
@@ -195,13 +252,15 @@ struct HadOutKernel {
 //   part[p, m, n] = sum_{k in split p} xh[shard(n), m, k] * W_inner[k, n]
 // Thread = (column strip of NT tiles, K split). Loops over its tile-rows.
 
-template <int K, int CB, int MR, int NT>
+template <int K, int CB, int MR, int NT, bool FUSED = false>
 struct GemvKernel {
-    const fp16* xh;          // [S, M, Kdim]
+    const fp16* xh;          // [S, M, Kdim]  (unused when FUSED)
     const uint32_t* tr;      // [Kdim/16, N/16, 8K]
     const int* shard_of_nb;  // [N/128]
     float* part;             // [P, M, N]
     int M, Kdim, N, tiles_n, rows_per_split, n_strips;
+    FusedArgs fa;
+    int Psplit;     // number of K splits (fused split-K reduction target)
 
     static constexpr int G = Geo<K>::G;
     static constexpr int V = Geo<K>::V;
@@ -249,6 +308,27 @@ struct GemvKernel {
         if (r1 > Kdim / 16) r1 = Kdim / 16;
 
         simd<float, ACC> acc = 0.0f;
+        if constexpr (FUSED) {
+            // r0, r1 are multiples of 8 tile-rows: one input-Hadamard block per 8 tile-rows
+            for (int rb = r0; rb < r1; rb += 8) {
+                simd<fp16, MR * 128> xblk;
+                fused_had_in<MR>(fa, M, Kdim, shard, rb / 8, xblk);
+#pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    int r = rb + i;
+                    size_t t0 = (size_t)r * tiles_n + tile_n0;
+                    simd<uint32_t, NT * W> words, prev;
+                    load_words<NT, W>(tr + t0 * W, t0 == 0, words, prev);
+                    simd<fp16, MR * 16> xr;
+#pragma unroll
+                    for (int m = 0; m < MR; ++m)
+                        xr.template select<16, 1>(m * 16) = xblk.template select<16, 1>(m * 128 + i * 16);
+                    simd<fp16, ACC> hacc = 0;
+                    step<0>(words, prev, xr, hacc);
+                    acc += convert<float>(hacc);
+                }
+            }
+        } else {
         const fp16* xbase = xh + (size_t)shard * M * Kdim;   // blocked [k/16][M][16]
 
         for (int r = r0; r < r1; ++r) {
@@ -268,6 +348,7 @@ struct GemvKernel {
             simd<fp16, ACC> hacc = 0;
             step<0>(words, prev, xr, hacc);
             acc += convert<float>(hacc);
+        }
         }
 
         // reduce groups of L = 32/V adjacent lanes -> 8 columns per half, per tile
@@ -289,6 +370,7 @@ struct GemvKernel {
                 block_store<float, 16>(part + ((size_t)p * M + m) * N + (tile_n0 + j) * 16, o);
             }
         }
+        if constexpr (FUSED) fused_had_out(fa, part, M, N, Psplit, tile_n0 * 16, NT * 16);
     }
 };
 
@@ -302,13 +384,15 @@ struct GemvKernel {
 // Reading the trellis words in (b-major, a-minor) lane order (a transpose folded into the word
 // read) lets each b-row be written with one strided region move.
 
-template <int K, int CB, int MB, int NT>
+template <int K, int CB, int MB, int NT, bool FUSED = false>
 struct DpasKernel {
     const fp16* xh;          // [S, M, Kdim]
     const uint32_t* tr;      // [Kdim/16, N/16, 8K]
     const int* shard_of_nb;  // [N/128]
     float* part;             // [P, M, N]
     int M, Kdim, N, tiles_n, rows_per_split, n_strips, m_blocks, Mp;   // xh rows padded to Mp = m_blocks * MB
+    FusedArgs fa;
+    int Psplit;     // number of K splits (fused split-K reduction target)
 
     static constexpr int G = Geo<K>::G, V = Geo<K>::V, D = Geo<K>::D, W = Geo<K>::WORDS;
     static constexpr int P = V == 8 ? 4 : (V == 16 ? 2 : 1);   // grp period in rows
@@ -390,6 +474,34 @@ struct DpasKernel {
         int mrows = M - m0; if (mrows > MB) mrows = MB;
 
         simd<float, MB * 16 * NT> acc = 0.0f;   // [NT][MB][16]
+        if constexpr (FUSED) {
+            static_assert(MB == 8, "fused DPAS path is for one 8-row block");
+            for (int rb = r0; rb < r1; rb += 8) {
+                simd<fp16, MB * 128> xblk;
+                fused_had_in<MB>(fa, M, Kdim, shard, rb / 8, xblk);
+#pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    int r = rb + i;
+                    size_t t0 = (size_t)r * tiles_n + tile_n0;
+                    simd<uint32_t, NT * W> words, prevs;
+                    load_words<NT, W>(tr + t0 * W, t0 == 0, words, prevs);
+                    simd<fp16, MB * 16> Am;
+#pragma unroll
+                    for (int m = 0; m < MB; ++m)
+                        Am.template select<16, 1>(m * 16) = xblk.template select<16, 1>(m * 128 + i * 16);
+            #pragma unroll
+                        for (int j = 0; j < NT; ++j) {
+                            simd<uint32_t, W> dw = words.template select<W, 1>(j * W);
+                            simd<uint32_t, W> dwprev = prevs.template select<W, 1>(j * W);
+                            simd<fp16, 256> Bv;
+                            if constexpr (K == 4) build_k4(dw, dwprev, Bv);
+                            else build<0>(dw, dwprev, Bv);
+                            auto c = acc.template select<128, 1>(j * MB * 16);
+                            c = xmx::dpas<8, 8, float, float, fp16, fp16>(simd<float, 128>(c), Bv, Am);
+                        }
+                }
+            }
+        } else {
         const fp16* xbase = xh + (size_t)shard * Mp * Kdim;   // blocked [k/16][Mp][16], pad rows zero
 
         for (int r = r0; r < r1; ++r) {
@@ -412,6 +524,7 @@ struct DpasKernel {
                 }
             }
         }
+        }
 #pragma unroll
         for (int j = 0; j < NT; ++j)
 #pragma unroll
@@ -419,6 +532,7 @@ struct DpasKernel {
                 if (m < mrows)
                     block_store<float, 16>(part + ((size_t)p * M + m0 + m) * N + (tile_n0 + j) * 16,
                                            acc.template select<16, 1>((j * MB + m) * 16));
+        if constexpr (FUSED) fused_had_out(fa, part, M, N, Psplit, tile_n0 * 16, NT * 16);
     }
 };
 
