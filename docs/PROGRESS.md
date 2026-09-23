@@ -264,3 +264,6 @@ Outside the captured target graph, per step: target lm_head (M=4) 1.78 ms, draft
 linears ~1.3 ms, FA2/argmax/reduce ~0.8 ms: ~5.7 ms GPU. The graph (target linears ~30 ms + attention/GDN) is the
 rest; ~146 small aten::copy_ per step cost ~6 ms CPU but overlap with GPU work. C1 is GPU-bound on the M=4
 target linears (31.7 ms, 415 GB/s; decode-bound: MB=4 and vector-kernel variants measured no better).
+LSC L1/L2 prefetch of trellis words EXL3_PF_DIST rows ahead (GEMV + DPAS, opt-in EXL3_L1_PF), all linears 2 reps:
+dist 1: M=1 27.1-27.2, M=4 30.6-31.7, M=16 34.2-35.1; dist 2: 27.6-27.7 / 30.6-31.4 / 34.6-35.2; dist 4: 28.6 /
+31.2-31.9 / 35.2-36.4; current: 27.2 / 31.3-31.5 / 34.6-34.7 ms. Noise or worse: rejected (left opt-in).

@@ -16,6 +16,7 @@
 #include <sycl/sycl.hpp>
 #include <sycl/ext/intel/esimd.hpp>
 #include <sycl/ext/intel/esimd/xmx/dpas.hpp>
+#include <sycl/ext/intel/experimental/esimd/memory.hpp>
 
 namespace exl3 {
 
@@ -130,6 +131,31 @@ ESIMD_INLINE void load_words(const uint32_t* p, bool first, simd<uint32_t, NT * 
 #pragma unroll
     for (int j = 0; j < NT; ++j) prev[j * W] = words[j * W + W - 1];
 }
+
+#ifdef EXL3_L1_PF
+#ifndef EXL3_PF_DIST
+#define EXL3_PF_DIST 2
+#endif
+// Cache-only prefetch (no registers) of the trellis words EXL3_PF_DIST K-rows ahead, in 64-dword blocks.
+template <int N>
+ESIMD_INLINE void pf_words(const uint32_t* p) {
+    static_assert(N % 32 == 0 || N < 32, "prefetch granularity");
+    if constexpr (N % 64 != 0) {
+#pragma unroll
+        for (int c = 0; c < (N + 31) / 32; ++c)
+            sycl::ext::intel::experimental::esimd::lsc_prefetch<uint32_t, 32, sycl::ext::intel::experimental::esimd::lsc_data_size::default_size,
+                sycl::ext::intel::experimental::esimd::cache_hint::cached, sycl::ext::intel::experimental::esimd::cache_hint::cached>(p + 32 * c);
+    } else if constexpr (N < 64) {
+        sycl::ext::intel::experimental::esimd::lsc_prefetch<uint32_t, N, sycl::ext::intel::experimental::esimd::lsc_data_size::default_size,
+            sycl::ext::intel::experimental::esimd::cache_hint::cached, sycl::ext::intel::experimental::esimd::cache_hint::cached>(p);
+    } else {
+#pragma unroll
+        for (int c = 0; c < N / 64; ++c)
+            sycl::ext::intel::experimental::esimd::lsc_prefetch<uint32_t, 64, sycl::ext::intel::experimental::esimd::lsc_data_size::default_size,
+                sycl::ext::intel::experimental::esimd::cache_hint::cached, sycl::ext::intel::experimental::esimd::cache_hint::cached>(p + 64 * c);
+    }
+}
+#endif
 
 // Reorder each group of D*GV words from interleaved (word D*g + i) to planar (plane i, lane g).
 template <int NGRP, int D, int GV>
@@ -369,6 +395,9 @@ struct GemvKernel {
         for (int r = r0; r < r1; ++r) {
             size_t t0 = (size_t)r * tiles_n + tile_n0;
             simd<uint32_t, NT * W> words, prev;
+#ifdef EXL3_L1_PF
+            if (r + EXL3_PF_DIST < r1) pf_words<NT * W>(tr + (t0 + (size_t)EXL3_PF_DIST * tiles_n) * W);
+#endif
             load_words<NT, W>(tr + t0 * W, t0 == 0, words, prev);
             if constexpr (PLANAR) { planarize<NP, D, GV>(words); planarize<NP, D, GV>(prev); }
             simd<fp16, MR * 16> xr = 0;
@@ -572,6 +601,9 @@ struct DpasKernel {
                 load_words<NT, W>(tr + t1 * W, false, nwords, nprevs);
             }
 #else
+#ifdef EXL3_L1_PF
+            if (r + EXL3_PF_DIST < r1) pf_words<NT * W>(tr + (t0 + (size_t)EXL3_PF_DIST * tiles_n) * W);
+#endif
             load_words<NT, W>(tr + t0 * W, t0 == 0, words, prevs);
             if constexpr (PLANAR) { planarize<NT, D, G>(words); planarize<NT, D, G>(prevs); }
 #endif
