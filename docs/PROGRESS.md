@@ -284,8 +284,14 @@ near the integer-ALU roofline (~25 ms of ALU work per step vs 27-31 ms measured 
 ISA (256-GRF, no GRF spills; 102 predicate-flag spill loads in the epilogue store chain): IGC hoists part of the next
 tile's decode ahead of each 8-dpas burst. Per 16x16 tile per XVE: decode ~144 cycles (72 SIMD32 ALU), DPAS ~128
 (8 x dpas.8x8), serial sum ~272; measured ~423 (67 ms, 52 TFLOPS). Every layer type is equally slow at M=64
-(gate_up 199 GB/s with P=1, lm_head 232), so it is not split-K partials. Largest remaining term: each thread
-re-loads the 64-row activation block (2 KB per K-row, 1 KB per tile) from L1 at ~8 B/clk/XVE (~128 cycles/tile).
-Cheap fixes already measured and lost (MB=32 NT=4 halves A traffic but doubles decode: 100 ms at M=64).
-Next large-M lever is a redesign: decode each weight tile once into SLM and share it across threads that own
-different row blocks (decode once, A traffic per thread / MB), not a tuning change.
+(gate_up 199 GB/s with P=1, lm_head 232), so it is not split-K partials. (A first guess, activation reload from L1,
+was wrong: see the probes below.)
+
+Timing probes (wrong-result debug builds, all linears, 2 reps):
+- EXL3_DEBUG_A_ONCE (activations loaded once per thread): M=64 67.9 -> 65.3 ms, M<=32 ~unchanged. A reload is ~3 ms.
+- EXL3_DEBUG_B_FAKE (no trellis decode, B = raw words): M=4 30.7 -> 26.6, M=16 34.6 -> 28.9, M=32 46.3 -> 31.3,
+  M=64 67.9 -> 49.3 ms. Decode costs ~4 / 6 / 15 / 19 ms and does not overlap DPAS at M>=32; DPAS+loads alone at
+  M=64 is 49 ms (~70 TFLOPS).
+- EXL3_BV_ALL (separate B registers per tile so decode j+1 need not wait on dpas j reading shared B): no change
+  (M=32 46.3 -> 45.5-46.6, M=64 67.6 -> 67.3-68.1). Rejected. The SLM shared-decode redesign is also off: its
+  per-thread operand traffic would be ~4x the current A traffic.

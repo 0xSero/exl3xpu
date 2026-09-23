@@ -481,8 +481,8 @@ struct DpasKernel {
     static constexpr int RHS = PLANAR ? P : D * P;
     static constexpr int RPS = PLANAR ? G : 1;
 
-    template <int u>
-    static ESIMD_INLINE void build(simd<uint32_t, W>& dw, simd<uint32_t, W>& dwprev, simd<fp16, 256>& Bv) {
+    template <int u, class BT>
+    static ESIMD_INLINE void build(simd<uint32_t, W>& dw, simd<uint32_t, W>& dwprev, BT&& Bv) {
         if constexpr (u < V) {
             constexpr int e = (u + 1) * K;
             constexpr int i1 = (e - 1) / 32;
@@ -521,7 +521,8 @@ struct DpasKernel {
 #ifndef EXL3_HALVES_MAXMB
 #define EXL3_HALVES_MAXMB 32
 #endif
-    static ESIMD_INLINE void build_k4(simd<uint32_t, W>& dw, simd<uint32_t, W>& prev, simd<fp16, 256>& Bv) {
+    template <class BT>
+    static ESIMD_INLINE void build_k4(simd<uint32_t, W>& dw, simd<uint32_t, W>& prev, BT&& Bv) {
 #ifdef EXL3_K4_HALVES   // REJECTED: wrong DPAS B layout at MB<=32 (caught by extended Gate A1)
       if constexpr (MB <= EXL3_HALVES_MAXMB) {
         // Same values, as two 16-lane halves (h = 0, 1) that read the word region <4;2,0> directly instead of
@@ -643,21 +644,44 @@ struct DpasKernel {
             load_words<NT, W>(tr + t0 * W, t0 == 0, words, prevs);
             if constexpr (PLANAR) { planarize<NT, D, G>(words); planarize<NT, D, G>(prevs); }
 #endif
+#ifdef EXL3_DEBUG_A_ONCE
+            // timing probe only (wrong results): activation block loaded once per thread, not per K-row
+            simd<fp16, MB * 16> Am = block_load<fp16, MB * 16>(xbase + ((size_t)r0 * Mp + m0) * 16);
+#else
             simd<fp16, MB * 16> Am = block_load<fp16, MB * 16>(xbase + ((size_t)r * Mp + m0) * 16);
+#endif
+#ifdef EXL3_BV_ALL
+            // one B register block per tile: decoding tile j+1 no longer waits on tile j's dpas reading a shared
+            // B register (write-after-read), so the ALU decode overlaps the asynchronous XMX work
+            simd<fp16, 256 * NT> Ball;
+#endif
 #pragma unroll
             for (int j = 0; j < NT; ++j) {
                 simd<uint32_t, W> dw = words.template select<W, 1>(j * W);
                 simd<uint32_t, W> dwprev = prevs.template select<W, 1>(j * W);
+#ifdef EXL3_BV_ALL
+                auto Bv = Ball.template select<256, 1>(256 * j);
+#else
                 simd<fp16, 256> Bv;
+#endif
+#ifdef EXL3_DEBUG_B_FAKE
+                // timing probe only (wrong results): B operand = raw words as fp16, no trellis decode
+                if constexpr (W >= 32) {
+#pragma unroll
+                    for (int q = 0; q < 4; ++q)
+                        Bv.template select<64, 1>(64 * q) = dw.template select<32, 1>(0).template bit_cast_view<fp16>();
+                }
+#else
                 if constexpr (K == 4) build_k4(dw, dwprev, Bv);
                 else build<0>(dw, dwprev, Bv);
+#endif
                 // DPAS repeat count RC rows per instruction: 8, or MB itself for MB=4 (no zero-row work)
                 constexpr int RC = MB < 8 ? MB : 8;
 #pragma unroll
                 for (int rb = 0; rb < MB / RC; ++rb) {
                     auto c = acc.template select<RC * 16, 1>((j * MB + rb * RC) * 16);
                     c = xmx::dpas<8, RC, float, float, fp16, fp16>(
-                        simd<float, RC * 16>(c), Bv, simd<fp16, RC * 16>(Am.template select<RC * 16, 1>(rb * RC * 16)));
+                        simd<float, RC * 16>(c), simd<fp16, 256>(Bv), simd<fp16, RC * 16>(Am.template select<RC * 16, 1>(rb * RC * 16)));
                 }
             }
         }
