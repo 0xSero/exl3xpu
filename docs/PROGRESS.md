@@ -195,3 +195,6 @@ Target-thread sweep for DPAS MB=8/16 (all linears, graph-captured, B70 #1): 1024
 at 1024 (47.6 vs 49.6 at 1536); MB=64 flat 1408-2048 (67.9-68.6), stays 2048. Vector kernel at M=3/4
 (VECMAX=4): 45.7 / 44.6 ms vs DPAS 35: rejected. New default MB<=16 1408 (env EXL3_TARGET_THREADS_MB16).
 Gate A1 PASS. After: M=1 29.4, M=4 33.4, M=16 36.2, M=32 47.9, M=64 69.3 ms.
+Served (B70 #1, agg tok/s, full-v2 -> MB<=16 1408 + prev-from-regs): think off C1 prose 53.9 -> 56.6, code
+75.3 -> 79.2; C2 97.3 -> 104.2 / 137.6 -> 147.7; C4 170.7 -> 184.3 / 240.1 -> 254.7. Think on C1 prose
+64.5 -> 70.3, code 54.3 -> 58.3; C2 122.5 -> 122.7 / 97.8 -> 106.2; C4 223.0 -> 237.5 / 173.0 -> 187.0. Kept.
