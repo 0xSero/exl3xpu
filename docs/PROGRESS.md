@@ -362,3 +362,16 @@ vs the synthetic greedy panel: C1-C8 equal or higher (real prose drafts better),
 the old 2048 cap, more KV per stream). These become the headline numbers; the synthetic panel stays as reference.
 k=2 many-users panel (noise corpus) prose C1 65.8, C2 123.5, C4 227.6, C8 337.4, C16 435.7; code C1 59.0, C2 107.8,
 C4 188.9 (C8/C16 code invalid: server killed by an overlapping run; to redo).
+
+### Codebook-affine fold (2026-09-24): opt-in (EXL3_FOLD), not default
+sum_k a_k w_k = c1 sum_k a_k h_k + c2 sum_k a_k with h = fp16(1024 + bytesum): the per-weight fp16 mad leaves the
+decode loop; row sums come from one extra dpas against an all-ones B per row block; affine applied at the store in
+fp32 (unrounded weight, within half an fp16 ulp of exllamav3's hfma weight). DPAS MB<=8 only (MB=16: accumulator
+spill, M=16 34.6 -> 70.5 ms). All linears: M=3 30.2 -> 29.2, M=4 31.1 -> 30.0, M=8 32.1 -> 31.0 ms (~3.5%).
+linear outputs: M=16..40 bitwise identical to production, M=4/8 differ by <= 0.0078 (fp16 rounding, by design).
+But Gate A1's gemm_raw path fails at M=24/40 (unfolded blocks) only in fold builds (EXL3_NO_FOLD build passes);
+cause not found. Small gain + unexplained gate anomaly: left opt-in, not shipped.
+Vision (bench/vision_bench.py, limits raised to 32 images / 4 videos): 16 numbered images @1024px read back in
+order (4/8/16 all OK). Image prefill: 1x512px 281 tok TTFT 0.61 s; 16x1024px 16.4K tok 12.4 s (1322 tok/s);
+16x2048px 65.6K tok 69.4 s (945 tok/s); decode with images in context 57-73 tok/s.
+Real-text prefill (Gutenberg): 4K 1680, 32K 1476, 128K 1020 tok/s (same as noise, as expected).

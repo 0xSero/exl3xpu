@@ -79,6 +79,17 @@ ESIMD_INLINE simd<fp16, N> decode_cb_h(simd<uint32_t, N> st) {
     }
 }
 
+// mul1 codebook without its affine: h = fp16(1024 + bytesum), exact. The affine w = h*c1 + c2 is applied to the
+// dot product instead (sum_k a_k w_k = c1 * sum_k a_k h_k + c2 * sum_k a_k), saving one fp16 mad per value.
+constexpr float kMul1C1 = 0.00676727294921875f, kMul1C2 = -10.3828125f;
+template <int N>
+ESIMD_INLINE simd<fp16, N> decode_mul1_raw(simd<uint32_t, N> st) {
+    simd<uint32_t, N> x = st * 0x83DCD12Du;
+    simd<uint32_t, N> bs = dp4a<uint32_t, uint32_t, uint32_t, uint32_t, N>(
+        simd<uint32_t, N>(0x6400u), x, simd<uint32_t, N>(0x01010101u));
+    return bs.template bit_cast_view<fp16>().template select<N, 2>(0);
+}
+
 template <int CB, int N>
 ESIMD_INLINE simd<float, N> decode_cb(simd<uint32_t, N> st) {
     return convert<float>(decode_cb_h<CB, N>(st));
@@ -477,6 +488,17 @@ struct DpasKernel {
     static constexpr bool PLANAR = D > 1;    // K=6: de-interleave words so the B-operand gathers use stride P
 #endif
     // lane L = 8*b + a reads word D*(P*a + b) + i: interleaved <P, D, 8, D*P>, planar <P, 1, 8, P> at plane i
+#ifndef EXL3_FOLD   // opt-in: +3.5% at M<=8 but an unexplained gemm_raw gate anomaly at M=24/40 (see PROGRESS)
+    static constexpr bool FOLD = false;
+#else
+    // codebook affine folded out of the decode loop where decode is the bottleneck (small row blocks)
+    static constexpr bool FOLD = (CB == 2) && (MB <= 8) && !FUSED;   // MB=16: extra accumulator spills (35 -> 70 ms)
+#endif
+    template <int N>
+    static ESIMD_INLINE simd<fp16, N> dec(simd<uint32_t, N> st) {
+        if constexpr (FOLD) return decode_mul1_raw<N>(st);
+        else return decode_cb_h<CB, N>(st);
+    }
     static constexpr int RVS = PLANAR ? 1 : D;
     static constexpr int RHS = PLANAR ? P : D * P;
     static constexpr int RPS = PLANAR ? G : 1;
@@ -501,7 +523,7 @@ struct DpasKernel {
                 if constexpr (s == 0) st = Bw;
                 else st = (Aw << (32 - s)) | (Bw >> s);
             }
-            simd<fp16, G> v = decode_cb_h<CB, G>(st & 0xFFFFu);
+            simd<fp16, G> v = dec<G>(st & 0xFFFFu);
             constexpr int h = (u >> 2) & 1;
             constexpr int R = 4 * ((u >> 1) & 1) + ((u >> 3) & 3);      // row0(u) / 2
             constexpr int C0 = 16 * h + (u & 1);
@@ -542,7 +564,7 @@ struct DpasKernel {
                 for (int m = 0; m < 4; ++m) {
                     simd<uint32_t, 16> st = ((prev2.template replicate_vs_w_hs<8, 4, 2, 0>(m) << sl)
                                              | (dw.template replicate_vs_w_hs<8, 4, 2, 0>(m) >> sr)) & 0xFFFFu;
-                    Bv.template select<16, 1>(32 * m + 128 * q1 + 16 * h) = decode_cb_h<CB, 16>(st);
+                    Bv.template select<16, 1>(32 * m + 128 * q1 + 16 * h) = dec<16>(st);
                 }
             }
         }
@@ -565,7 +587,7 @@ struct DpasKernel {
                 pw.template select<16, 1>(0) = prev2.template replicate_vs_w_hs<8, 4, 2, 0>(m);
                 pw.template select<16, 1>(16) = pw.template select<16, 1>(0);
                 simd<uint32_t, 32> st = ((pw << sl) | (cw >> sr)) & 0xFFFFu;
-                Bv.template select<32, 1>(32 * m + 128 * q1) = decode_cb_h<CB, 32>(st);
+                Bv.template select<32, 1>(32 * m + 128 * q1) = dec<32>(st);
             }
         }
       }
@@ -587,6 +609,7 @@ struct DpasKernel {
         int mrows = M - m0; if (mrows > MB) mrows = MB;
 
         simd<float, MB * 16 * NT> acc = 0.0f;   // [NT][MB][16]
+        simd<float, FOLD ? MB * 16 : 16> accs = 0.0f;   // FOLD: activation row sums (all 16 columns equal)
         if constexpr (FUSED) {
             static_assert(MB == 8, "fused DPAS path is for one 8-row block");
             for (int rb = r0; rb < r1; rb += 8) {
@@ -684,15 +707,33 @@ struct DpasKernel {
                         simd<float, RC * 16>(c), simd<fp16, 256>(Bv), simd<fp16, RC * 16>(Am.template select<RC * 16, 1>(rb * RC * 16)));
                 }
             }
+            if constexpr (FOLD) {
+                // sum_k a_k per row, on the (idle) XMX unit: one dpas against an all-ones B per row block
+                constexpr int RC = MB < 8 ? MB : 8;
+                simd<fp16, 256> ones = fp16(1.0f);
+#pragma unroll
+                for (int rb = 0; rb < MB / RC; ++rb) {
+                    auto c = accs.template select<RC * 16, 1>(rb * RC * 16);
+                    c = xmx::dpas<8, RC, float, float, fp16, fp16>(
+                        simd<float, RC * 16>(c), ones, simd<fp16, RC * 16>(Am.template select<RC * 16, 1>(rb * RC * 16)));
+                }
+            }
         }
         }
 #pragma unroll
         for (int j = 0; j < NT; ++j)
 #pragma unroll
             for (int m = 0; m < MB; ++m)
-                if (m < mrows)
-                    block_store<float, 16>(part + ((size_t)p * M + m0 + m) * N + (tile_n0 + j) * 16,
-                                           acc.template select<16, 1>((j * MB + m) * 16));
+                if (m < mrows) {
+                    if constexpr (FOLD) {
+                        simd<float, 16> o = acc.template select<16, 1>((j * MB + m) * 16);
+                        o = o * kMul1C1 + simd<float, 16>(accs.template select<16, 1>(m * 16)) * kMul1C2;
+                        block_store<float, 16>(part + ((size_t)p * M + m0 + m) * N + (tile_n0 + j) * 16, o);
+                    } else {
+                        block_store<float, 16>(part + ((size_t)p * M + m0 + m) * N + (tile_n0 + j) * 16,
+                                               acc.template select<16, 1>((j * MB + m) * 16));
+                    }
+                }
         if constexpr (FUSED) fused_had_out(fa, part, M, N, Psplit, tile_n0 * 16, NT * 16);
     }
 };

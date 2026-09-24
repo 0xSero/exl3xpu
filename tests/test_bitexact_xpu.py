@@ -9,7 +9,7 @@ Gate A1: every XPU decode path is bit-exact with exllamav3.
 
 Usage: python3 tests/test_bitexact_xpu.py [--quick]
 """
-import sys, os, json, time, random
+import os, sys, json, time, random
 import torch
 from safetensors import safe_open
 
@@ -77,6 +77,17 @@ for i, key in enumerate(keys):
                         xh[0, kk // 16, m, kk % 16] = 1.0
                     part = E.exl3_gemm_raw(xh, tr, shard, n, K, cb, path)[:, :nn_]
                     exp = wr[ks].float()
+                    if path == 1 and M <= 8 and os.environ.get("EXL3_FOLD_TEST") == "1":
+                        # folded codebook affine (DPAS MB<=16): the kernel applies w = c1*h + c2 in fp32 to the dot
+                        # product, i.e. the unrounded weight; exllamav3's hfma rounds it once to fp16, so the two
+                        # agree to within half an fp16 ulp of the reference weight
+                        ulp = torch.where(exp == 0, torch.full_like(exp, 2.0 ** -24),
+                                          2.0 ** (torch.floor(torch.log2(exp.abs().clamp_min(2.0 ** -24))) - 10))
+                        bad = ((part - exp).abs() > 0.5 * ulp + 1e-6).sum().item()
+                        if bad:
+                            fails.append(f"dpas-fold M={M} {key} rows {ks[:3]}...: {bad} beyond half an fp16 ulp")
+                            break
+                        continue
                     if not torch.equal(part, exp):
                         bad = (part != exp).sum().item()
                         fails.append(f"{'vector' if path == 0 else 'dpas'} M={M} {key} rows {ks[:3]}...: {bad} mismatches")
