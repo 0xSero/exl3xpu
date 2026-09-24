@@ -29,7 +29,7 @@ cap, 60-90 s sustained windows (`bench/sweep.py`); raw rows in `bench/results/20
 | 8 | 362.6 | 294.3 |
 | 16 | 409.9 | 344.2 |
 
-Cold prefill, one request: 4K **1589**, 32K **1497**, 128K **1049**, 254K **763** tok/s.
+Cold prefill, one request: 4K **1,654**, 32K **1,483**, 128K **1,020**, 254K **726** tok/s (4096-token prefill chunks).
 
 Same card, tuned llama.cpp SYCL Q4_K_M (`qwen38-q4km-arcb70-llamacpp-tp1`): C1 25.0, C8 56.8, C16 56.0
 aggregate; prefill 4K 999, 32K 629 tok/s.

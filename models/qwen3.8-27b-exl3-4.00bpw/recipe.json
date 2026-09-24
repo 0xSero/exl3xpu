@@ -1,7 +1,7 @@
 {
  "id": "qwen38-27b-exl3-4bpw-arcb70-vllm-exl3xpu-tp1",
  "status": "candidate",
- "description": "Qwen3.8-27B EXL3 4.00bpw (turboderp) on ONE Intel Arc Pro B70 via vLLM 0.26.1 XPU + the exl3xpu plugin: bit-exact EXL3 trellis decode in ESIMD kernels, MTP speculative decoding (k=3, EXL3 MTP head, pruned draft vocab), fp8 KV cache (272,570 tokens, 1600-token blocks), 262,144-token context, 16 sequences, image + video input. Thinking on: C1 decode 61-77 tok/s, C8 aggregate 294-363 tok/s, C16 344-410 tok/s, cold prefill 1589 (4K) / 1497 (32K) / 1049 (128K) tok/s. Beats the tuned llama.cpp SYCL Q4_K_M recipe on the same card on every cell.",
+ "description": "Qwen3.8-27B EXL3 4.00bpw (turboderp) on ONE Intel Arc Pro B70 via vLLM 0.26.1 XPU + the exl3xpu plugin: bit-exact EXL3 trellis decode in ESIMD kernels, MTP speculative decoding (k=3, EXL3 MTP head, pruned draft vocab), fp8 KV cache (272,570 tokens, 1600-token blocks), 262,144-token context, 16 sequences, image + video input. Thinking on: C1 decode 61-77 tok/s, C8 aggregate 294-363 tok/s, C16 344-410 tok/s, cold prefill 1654 (4K) / 1483 (32K) / 1020 (128K) tok/s. Beats the tuned llama.cpp SYCL Q4_K_M recipe on the same card on every cell.",
  "model": {
   "repo": "turboderp/Qwen3.8-27B-exl3",
   "revision": "113cf7ab958054860e43fb7f3063b1af19171095",
@@ -350,49 +350,49 @@
    "kind": "prefill",
    "concurrency": 1,
    "context_tokens": 4096,
-   "prompt_tokens_mean": 4187,
+   "prompt_tokens_mean": 4185,
    "cache_state": "cold-unique",
-   "prefill_tok_s_total": 1589.1,
-   "prefill_tok_min_total": 95348,
-   "ttft_ms_p50": 2635,
+   "prefill_tok_s_total": 1653.5,
+   "prefill_tok_min_total": 99211,
+   "ttft_ms_p50": 2531,
    "flags": [],
-   "label": "full-v1-prefill"
+   "label": "prefill-c4096"
   },
   {
    "kind": "prefill",
    "concurrency": 1,
    "context_tokens": 32768,
-   "prompt_tokens_mean": 32874,
+   "prompt_tokens_mean": 32873,
    "cache_state": "cold-unique",
-   "prefill_tok_s_total": 1497.4,
-   "prefill_tok_min_total": 89843,
-   "ttft_ms_p50": 21954,
+   "prefill_tok_s_total": 1482.6,
+   "prefill_tok_min_total": 88959,
+   "ttft_ms_p50": 22172,
    "flags": [],
-   "label": "full-v1-prefill"
+   "label": "prefill-c4096"
   },
   {
    "kind": "prefill",
    "concurrency": 1,
    "context_tokens": 131072,
-   "prompt_tokens_mean": 131259,
+   "prompt_tokens_mean": 131085,
    "cache_state": "cold-unique",
-   "prefill_tok_s_total": 1049.2,
-   "prefill_tok_min_total": 62953,
-   "ttft_ms_p50": 125102,
+   "prefill_tok_s_total": 1020.3,
+   "prefill_tok_min_total": 61221,
+   "ttft_ms_p50": 128472,
    "flags": [],
-   "label": "full-v1-prefill"
+   "label": "prefill-c4096"
   },
   {
    "kind": "prefill",
    "concurrency": 1,
    "context_tokens": 253952,
-   "prompt_tokens_mean": 254125,
+   "prompt_tokens_mean": 254072,
    "cache_state": "cold-unique",
-   "prefill_tok_s_total": 763.1,
-   "prefill_tok_min_total": 45786,
-   "ttft_ms_p50": 333014,
+   "prefill_tok_s_total": 726.0,
+   "prefill_tok_min_total": 43561,
+   "ttft_ms_p50": 349951,
    "flags": [],
-   "label": "prefill-fp8blk2"
+   "label": "prefill-c4096"
   }
  ],
  "baseline_llamacpp_same_card": {
@@ -472,10 +472,10 @@
    "c1_code_think_on": 63.28,
    "c8_prose_think_on_total": 362.65,
    "c8_code_think_on_total": 294.3,
-   "prefill_4k": 1589.1,
-   "prefill_32k": 1497.4,
-   "prefill_128k": 1049.2,
-   "prefill_254k": 763.1,
+   "prefill_4k": 1653.5,
+   "prefill_32k": 1482.6,
+   "prefill_128k": 1020.3,
+   "prefill_254k": 726.0,
    "c16_prose_think_on_total": 409.93,
    "c16_code_think_on_total": 344.17
   },
@@ -616,6 +616,12 @@
     "step": "exact 1600-token KV blocks (EXL3_KV_BLOCK_EXACT)",
     "c16_prose_think": "349.1 -> 409.9",
     "streams_resident_c16": "10 -> 14",
+    "kept": true
+   },
+   {
+    "step": "prefill chunk 4096 (was 8192)",
+    "max_decode_wait_s": "7.1 -> 3.7",
+    "prefill_128k": "1049 -> 1020",
     "kept": true
    }
   ],

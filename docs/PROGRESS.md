@@ -344,3 +344,5 @@ and the stall did not change (3.72 s). The stall is the prefill step itself: 409
 (last chunk at ~32K context ~3.7 s) and decode waits a full step. Left opt-in (EXL3_FP8KV_MIXED=1).
 Recipe default max_num_batched_tokens 8192 -> 2048: max decode wait 7.1 -> ~2 s under interleaved load, decode
 -3%, 32K prefill ~-6%.
+Prefill by chunk (cold, one request): 2048: 4K 1576, 32K 1411, 128K 954 (breaks T2), 254K 672; 4096: 1654 / 1483 /
+1020 / 726; 8192: 1589 / 1497 / 1049 / 763. Default set to 4096 (T2 holds, decode wait behind a long prompt 7.1 -> 3.7 s).
