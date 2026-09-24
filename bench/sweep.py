@@ -36,7 +36,9 @@ _uid = 0
 
 def unique_prompt(ctx_tokens: int, cls: str, rnd: random.Random) -> str:
     """Unique cold prefix (random-word document of ~ctx_tokens tokens, sized with the real tokenizer)
-    + a task that ends naturally."""
+    + a task that ends naturally. With --corpus real: Gutenberg / HumanEval / real source instead."""
+    if CORPUS["mode"] == "real":
+        return real_prompt(ctx_tokens, cls, rnd)
     global _uid
     _uid += 1
     tag = f"[doc {os.getpid()}-{_uid}-{rnd.random():.12f}]"
@@ -59,6 +61,84 @@ def unique_prompt(ctx_tokens: int, cls: str, rnd: random.Random) -> str:
     else:
         task = f"{tag} Write a detailed essay of about 600 words on {topic}. Use several paragraphs."
     return body + task
+
+
+# --- real-text corpus (bench/fetch_corpus.sh): Gutenberg books for prose, HumanEval + real Python source for code
+CORPUS = {"mode": "noise", "dir": os.path.join(os.path.dirname(os.path.abspath(__file__)), "corpus")}
+_BOOKS = None
+_HE = None
+_SRC = None
+
+
+def _books():
+    global _BOOKS
+    if _BOOKS is None:
+        g = os.path.join(CORPUS["dir"], "gutenberg")
+        _BOOKS = [open(os.path.join(g, f), encoding="utf-8", errors="ignore").read() for f in sorted(os.listdir(g))]
+        _BOOKS = [b for b in _BOOKS if len(b) > 100000]
+        assert _BOOKS, "no Gutenberg books: run bench/fetch_corpus.sh"
+    return _BOOKS
+
+
+def _humaneval():
+    global _HE
+    if _HE is None:
+        _HE = [json.loads(l)["prompt"] for l in open(os.path.join(CORPUS["dir"], "humaneval.jsonl"))]
+    return _HE
+
+
+def _source():
+    """Real Python source (the installed vLLM package), concatenated file by file."""
+    global _SRC
+    if _SRC is None:
+        import vllm
+        root = os.path.dirname(vllm.__file__)
+        files = sorted(glob.glob(os.path.join(root, "**", "*.py"), recursive=True))
+        _SRC = [(os.path.relpath(f, root), open(f, encoding="utf-8", errors="ignore").read()) for f in files]
+        _SRC = [(n, s) for n, s in _SRC if len(s) > 2000]
+    return _SRC
+
+
+def _take_tokens(text: str, start: int, ctx_tokens: int) -> str:
+    """Slice of text from char offset start holding ~ctx_tokens tokens (sized with the tokenizer, ~1%)."""
+    n = int(ctx_tokens * 4.2)
+    for _ in range(4):
+        s = text[start:start + n]
+        got = count_tokens(s)
+        if abs(got - ctx_tokens) <= ctx_tokens * 0.01 or start + n >= len(text):
+            break
+        n = max(1, int(n * ctx_tokens / got))
+    return text[start:start + n]
+
+
+def real_prompt(ctx_tokens: int, cls: str, rnd: random.Random) -> str:
+    global _uid
+    _uid += 1
+    tag = f"[req {os.getpid()}-{_uid}-{rnd.random():.12f}]"
+    if cls == "code":
+        if ctx_tokens > 0:
+            src = _source()
+            i = rnd.randrange(len(src))
+            parts, total = [], 0
+            while total < ctx_tokens * 4.2 * 1.3:
+                n, s = src[i % len(src)]
+                parts.append(f"# ===== file: {n} =====\n{s}")
+                total += len(s)
+                i += 1
+            body = _take_tokens("\n\n".join(parts), 0, ctx_tokens)
+            return (f"{tag}\n{body}\n\nExplain what the code above does, then pick one function from it and "
+                    f"rewrite it more clearly, with type hints and unit tests.")
+        problem = rnd.choice(_humaneval())
+        return (f"{tag} Complete the following Python function. Explain your approach, then give the full "
+                f"implementation and unit tests.\n\n{problem}")
+    book = rnd.choice(_books())
+    if ctx_tokens > 0:
+        start = rnd.randrange(0, max(1, len(book) - int(ctx_tokens * 4.5)))
+        body = _take_tokens(book + "\n" + book, start, ctx_tokens)
+        return f"{tag}\n{body}\n\nSummarize the passage above and discuss its main characters and themes in a detailed essay."
+    start = rnd.randrange(0, len(book) - 4000)
+    passage = book[start:start + 2000]
+    return f"{tag} Read this passage and write a detailed essay of about 600 words analysing it.\n\n{passage}"
 
 
 class GpuSampler:
@@ -235,7 +315,7 @@ async def decode_cell(args, C, ctx, cls):
                output_tokens_mean=round(statistics.mean(outs)) if outs else None,
                samples=len(per_stream), window_seconds=args.window, gpu_busy_pct=busy, flags=flags,
                spec_accept_len=accept_len,
-               label=args.label)
+               label=args.label, corpus=args.corpus)
     return row
 
 
@@ -276,7 +356,7 @@ async def prefill_cell(args, C, ctx):
                 prefill_tok_s_total=round(ptoks / wall, 1), prefill_tok_min_total=round(ptoks / wall * 60),
                 ttft_ms_p50=round(1000 * statistics.median(ttfts)) if ttfts else None,
                 ttft_ms_max=round(1000 * max(ttfts)) if ttfts else None,
-                waves=len(use), gpu_busy_pct=use[-1][4], flags=flags, label=args.label)
+                waves=len(use), gpu_busy_pct=use[-1][4], flags=flags, label=args.label, corpus=args.corpus)
 
 
 async def main():
@@ -300,7 +380,10 @@ async def main():
     ap.add_argument("--out", default="bench/results.jsonl")
     ap.add_argument("--skip-decode", action="store_true")
     ap.add_argument("--skip-prefill", action="store_true")
+    ap.add_argument("--corpus", choices=["noise", "real"], default="noise",
+                    help="noise: random-word documents + fixed tasks; real: Gutenberg / HumanEval / real source (bench/fetch_corpus.sh)")
     args = ap.parse_args()
+    CORPUS["mode"] = args.corpus
 
     rows = []
     # throwaway first cell after boot

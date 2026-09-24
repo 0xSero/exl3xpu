@@ -4,3 +4,4 @@ build/
 logs/
 *.egg-info/
 .claude/
+bench/corpus/
