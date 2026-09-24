@@ -11,6 +11,10 @@ from . import triton_kernels as tk
 # Rows at or below this use the fused decode-in-GEMM kernel; above it we reconstruct fp16
 # weight slices and use the oneDNN GEMM (compute bound regime).
 SMALL_M_MAX = int(os.environ.get("EXL3_SMALL_M_MAX", "128"))
+# Prefill (M > SMALL_M_MAX) GEMMs in int8 XMX (2x fp16 rate): per-token activation scale (Hadamard-rotated
+# activations have no outliers), one static weight scale (the mul1 codebook bound). Opt-in. The C++ op fuses the
+# quantization into had_in / reconstruct / had_out; the Python fallback below is the unfused prototype.
+INT8_PREFILL = os.environ.get("EXL3_INT8_PREFILL", "0") == "1"
 RECON_SLICE_N = int(os.environ.get("EXL3_RECON_SLICE_N", "16384"))
 
 _backend = os.environ.get("EXL3_BACKEND", "auto")
@@ -35,6 +39,8 @@ def _get_esimd():
                 _esimd.exl3_set_target_threads_mb16(int(os.environ["EXL3_TARGET_THREADS_MB16"]))
             if os.environ.get("EXL3_TARGET_THREADS_MB64") and hasattr(_esimd, "exl3_set_target_threads_mb64"):
                 _esimd.exl3_set_target_threads_mb64(int(os.environ["EXL3_TARGET_THREADS_MB64"]))
+            if INT8_PREFILL and hasattr(_esimd, "exl3_set_int8"):
+                _esimd.exl3_set_int8(1)          # fused W8A8 prefill inside the C++ linear
         except Exception as e:  # noqa
             if _backend != "triton":
                 # never degrade silently to the ~5x slower Triton path; opt in with EXL3_BACKEND=triton
@@ -95,7 +101,14 @@ def exl3_linear_impl(x: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, 
                 esimd.exl3_reconstruct(trellis, w, n0, K, cb)
             else:
                 tk.reconstruct(trellis, K, cb, n0, n1 - n0, out=w)
-            torch.matmul(xh[g], w, out=y[:, n0:n1])
+            if INT8_PREFILL:
+                sx = xh[g].abs().amax(1, keepdim=True).float().clamp_min(1e-8) / 127
+                sw = w.abs().amax(0, keepdim=True).float().clamp_min(1e-8) / 127
+                acc = torch._int_mm(torch.round(xh[g].float() / sx).to(torch.int8),
+                                    torch.round(w.float() / sw).to(torch.int8))
+                y[:, n0:n1] = (acc.float() * sx * sw).to(torch.float16)
+            else:
+                torch.matmul(xh[g], w, out=y[:, n0:n1])
     if fast:
         esimd.exl3_had_out_h(y, svh, out)
     else:
@@ -117,6 +130,8 @@ def _(x, trellis, suh, svh, shard_of_nb, group_bounds, K, cb):
 def exl3_linear(x, trellis, suh, svh, shard_of_nb, group_bounds, K, cb):
     """EXL3 linear. Uses the all-C++ op (no Python per call) when the ESIMD library supports K/cb."""
     esimd = _get_esimd() if _backend != "triton" else False
+    if INT8_PREFILL and x.numel() // x.shape[-1] > SMALL_M_MAX and not (esimd and hasattr(esimd, "exl3_set_int8")):
+        return _exl3_linear_py(x, trellis, suh, svh, shard_of_nb, group_bounds, K, cb)
     if esimd and hasattr(esimd, "linear") and esimd.exl3_supported(K, cb):
         return esimd.linear(x, trellis, suh, svh, shard_of_nb, group_bounds, K, cb, SMALL_M_MAX, RECON_SLICE_N)
     return _exl3_linear_py(x, trellis, suh, svh, shard_of_nb, group_bounds, K, cb)

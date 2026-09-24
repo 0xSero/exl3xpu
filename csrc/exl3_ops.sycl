@@ -329,6 +329,23 @@ static void launch_reconstruct(const at::Tensor& tr, at::Tensor& w, int n0, sycl
     q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
 }
 
+// W8A8 prefill (opt-in): mul1 codebook values are bounded by 3.453125, one static int8 scale for every tensor
+static bool g_int8 = false;
+void exl3_set_int8(int64_t on) { g_int8 = on != 0; }
+constexpr float kQ8WMax = 3.453125f;
+
+template <int K>
+static void launch_reconstruct_q8(const at::Tensor& tr, at::Tensor& w, int n0, sycl::queue& q) {
+    int tk = tr.size(0), tiles_n = tr.size(1), n_out = w.size(1);
+    constexpr int NT = 8;
+    int n_strips = n_out / (16 * NT);
+    ReconstructKernel<K, 2, NT, int8_t> k{reinterpret_cast<const uint32_t*>(tr.data_ptr()),
+                                          reinterpret_cast<int8_t*>(w.data_ptr()), tiles_n, n0 / 16, n_out, n_strips, tk,
+                                          127.0f / kQ8WMax};
+    int n = n_strips * tk, local = 8;
+    q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
+}
+
 void exl3_reconstruct(at::Tensor trellis, at::Tensor w, int64_t n0, int64_t K, int64_t cb) {
     TORCH_CHECK(w.scalar_type() == at::kHalf && w.is_contiguous() && w.size(1) % 128 == 0 && n0 % 128 == 0);
     TORCH_CHECK(w.size(0) == trellis.size(0) * 16 && n0 + w.size(1) <= trellis.size(1) * 16);
@@ -454,6 +471,40 @@ at::Tensor exl3_linear(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Ten
         return out.view(shape);
     }
     int64_t S = suh.size(0);
+    if (g_int8 && cb == 2 && (K == 4 || K == 6) && M > 16) {
+        auto& q = queue_of(x2);
+        auto xq = at::empty({S, M, k}, x.options().dtype(at::kChar));
+        auto sx = at::empty({S, M}, x.options().dtype(at::kFloat));
+        int n_in = S * M, local = 8;
+        auto run_in = [&](auto tag) {
+            using TIn = decltype(tag);
+            HadInQ8Kernel<TIn> kin{reinterpret_cast<const TIn*>(x2.data_ptr()), reinterpret_cast<const fp16*>(suh.data_ptr()),
+                                   reinterpret_cast<int8_t*>(xq.data_ptr()), sx.data_ptr<float>(), (int)M, (int)k, (int)S,
+                                   (int)x2.stride(0)};
+            q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n_in, local), local), kin); });
+        };
+        if (x2.scalar_type() == at::kHalf) run_in(fp16{});
+        else if (x2.scalar_type() == at::kBFloat16) run_in(sycl::ext::oneapi::bfloat16{});
+        else TORCH_CHECK(false, "x dtype");
+        const float sw = kQ8WMax / 127.0f;
+        for (size_t g = 0; g + 1 < group_bounds.size(); ++g) {
+            int64_t g0 = group_bounds[g], g1 = group_bounds[g + 1], ng = g1 - g0;
+            auto w = at::empty({k, ng}, x.options().dtype(at::kChar));
+            if (K == 4) launch_reconstruct_q8<4>(trellis, w, g0, q); else launch_reconstruct_q8<6>(trellis, w, g0, q);
+            auto y = at::_int_mm(xq[g], w);                                   // [M, ng] int32
+            int n_out = M * (ng / 128);
+            auto run_out = [&](auto tag) {
+                using TOut = decltype(tag);
+                HadOutQ8Kernel<TOut> ko{y.data_ptr<int32_t>(), sx.data_ptr<float>() + g * M,
+                                        reinterpret_cast<const fp16*>(svh.data_ptr()) + g0,
+                                        reinterpret_cast<TOut*>(out.data_ptr()) + g0, (int)M, (int)ng, (int)n, sw};
+                q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n_out, local), local), ko); });
+            };
+            if (out.scalar_type() == at::kHalf) run_out(fp16{});
+            else run_out(sycl::ext::oneapi::bfloat16{});
+        }
+        return out.view(shape);
+    }
     auto xh = at::empty({S, M, k}, x.options().dtype(at::kHalf));
     exl3_had_in_rm(x2, suh, xh);
     auto y = at::empty({M, n}, x.options().dtype(at::kHalf));
@@ -494,6 +545,7 @@ void exl3_set_target_threads_mb16(int64_t n) { g_target_threads_mb16 = (int)n; }
 void exl3_set_vec_max_m(int64_t n) { g_vec_max_m = (int)n; }
 
 TORCH_LIBRARY(exl3xpu_C, m) {
+    m.def("exl3_set_int8(int on) -> ()", &exl3_set_int8);
     m.def("linear(Tensor x, Tensor trellis, Tensor suh, Tensor svh, Tensor shard_of_nb, int[] group_bounds, int K, int cb, int small_m_max, int slice_n) -> Tensor");
     m.impl("linear", torch::kXPU, &exl3_linear);
     m.def("exl3_gemm_small(Tensor x, Tensor trellis, Tensor suh, Tensor svh, Tensor shard_of_nb, Tensor(a!) out, int K, int cb) -> ()");

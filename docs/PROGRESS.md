@@ -444,3 +444,19 @@ Its first run logged nothing: the engine went silent at 22:45 (no stats lines) a
 at 00:49 (Slot 19 Link Down, 4th time in 34 h). No decode-at-200K number yet.
 Next once a stable card is available: longctx.py at 131K/200K; then max_num_batched_tokens 6400/9600 for
 long prompts (fewer align chunks) against interleave stall.
+
+### W8A8 int8 prefill linears (2026-09-25), opt-in `EXL3_INT8_PREFILL=1`
+Xe2 XMX int8 runs 2x fp16 (oneDNN `_int_mm` 220-280 TOPS vs fp16 96-137 TFLOPS on B70). Prefill GEMMs already run
+in the Hadamard domain, where activations have no outliers (QuaRot setting), and mul1 codebook values are bounded
+by 3.453125 (std 1.0), so: per-(group,row) int8 activation scale fused into had_in (`HadInQ8Kernel`), one static
+weight scale 3.453125/127 fused into reconstruct (`ReconstructKernel<..., int8_t>`), int32 -> scale -> output
+Hadamard (`HadOutQ8Kernel`). Decode (M <= 128) is unchanged and stays bit-exact.
+- Kernel check (`tests/test_int8_prefill.py`, real tensors, M=4096): matches a torch reference of the same
+  quantization to 4.0e-4; rel err vs fp16 path 1.2-1.3e-2; all linears 1762 -> 1136 ms (1.55x; GEMM alone 2.0x;
+  per call on in_proj_qkvz: GEMM 2.86, had_out 0.79 (int32 read, bandwidth-bound), had_in 0.47, recon 0.21 ms).
+- Accuracy (`tests/prefill_nll.py`, 8 Gutenberg docs x 2K tokens, teacher-forced): NLL 1.64392 -> 1.64665
+  (+0.0027, +0.17% ppl), top-1 agreement with fp16 97.17%, mean |dlogp| 0.061. A real (small) quality cost.
+- Served, B70 #1, canonical recipe + prefix caching, cold, one wave each, same boot day (fp16 -> int8):
+  32K 1434 -> **1979** (1.38x), 128K 928 -> **1135** (1.22x); 4K cells were first-after-boot (JIT) for both, discarded.
+Not in the canonical recipe (quality trade is the user's call). Remaining overhead: had_out reads int32 (2x
+bytes), had_in has one thread per row; attention is untouched, so the 200K+ gain is smaller.

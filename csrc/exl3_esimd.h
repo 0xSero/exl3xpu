@@ -338,6 +338,58 @@ struct HadOutKernel {
 };
 
 // ------------------------------------------------------------------------------------------------
+// Prefill W8A8: had_in to int8 with one scale per (group, row). Thread = (g, m), two passes over the row
+// (max, then quantize); the pre-quantization values are exactly the fp16 path's xh.
+
+template <typename TIn>
+struct HadInQ8Kernel {
+    const TIn* x; const fp16* suh; int8_t* xq; float* sx;
+    int M, Kdim, S, x_stride;
+    ESIMD_INLINE simd<float, 128> blk(int g, int m, int kb) const {
+        simd<TIn, 128> xi = block_load<TIn, 128>(x + (size_t)m * x_stride + kb * 128);
+        simd<fp16, 128> su = block_load<fp16, 128>(suh + (size_t)g * Kdim + kb * 128);
+        simd<float, 128> v = convert<float>(xi) * convert<float>(su);
+        v = convert<float>(convert<fp16>(v));
+        fwht128(v);
+        v *= kRsqrt128;
+        return convert<float>(convert<fp16>(v));
+    }
+    void operator()(sycl::nd_item<1> it) const SYCL_ESIMD_KERNEL {
+        int id = it.get_global_id(0);
+        int m = id % M, g = id / M;
+        if (g >= S) return;
+        int kb_n = Kdim / 128;
+        simd<float, 128> mx = 0.0f;
+        for (int kb = 0; kb < kb_n; ++kb)
+            mx = max(mx, abs(blk(g, m, kb)));
+        float amax = hmax<float>(mx);
+        float sc = amax > 0.0f ? amax / 127.0f : 1.0f;
+        float inv = 1.0f / sc;
+        sx[(size_t)g * M + m] = sc;
+        for (int kb = 0; kb < kb_n; ++kb)
+            block_store<int8_t, 128>(xq + ((size_t)g * M + m) * Kdim + kb * 128,
+                                     convert<int8_t>(rnde<float>(blk(g, m, kb) * inv)));
+    }
+};
+
+// out[m, nb*128:+128] = svh * H(y_i32[m, :] * sx[m] * sw) / sqrt(128), for one fused group's columns
+template <typename TOut>
+struct HadOutQ8Kernel {
+    const int32_t* y; const float* sx; const fp16* svh; TOut* out;
+    int M, N, out_stride; float sw;
+    void operator()(sycl::nd_item<1> it) const SYCL_ESIMD_KERNEL {
+        int id = it.get_global_id(0);
+        int nb_n = N / 128;
+        int nb = id % nb_n, m = id / nb_n;
+        if (m >= M) return;
+        simd<float, 128> v = convert<float>(block_load<int32_t, 128>(y + (size_t)m * N + nb * 128)) * (sx[m] * sw);
+        fwht128(v);
+        v = v * kRsqrt128 * convert<float>(block_load<fp16, 128>(svh + nb * 128));
+        block_store<TOut, 128>(out + (size_t)m * out_stride + nb * 128, convert<TOut>(v));
+    }
+};
+
+// ------------------------------------------------------------------------------------------------
 // Fused trellis-decode GEMV/GEMM for small M.
 //   part[p, m, n] = sum_{k in split p} xh[shard(n), m, k] * W_inner[k, n]
 // Thread = (column strip of NT tiles, K split). Loops over its tile-rows.
@@ -767,10 +819,11 @@ struct DpasKernel {
 // Reconstruct W_inner (Hadamard domain) as fp16 [Kdim, n_out], columns [n0, n0 + n_out) of the
 // packed tensor. Thread = (tile-row, strip of NT tiles). Bit-exact.
 
-template <int K, int CB, int NT>
+template <int K, int CB, int NT, typename TW = fp16>
 struct ReconstructKernel {
-    const uint32_t* tr; fp16* w;
+    const uint32_t* tr; TW* w;
     int tiles_n, tile_n0, n_out, n_strips, tk;
+    float q8_inv = 0.0f;   // TW = int8_t: w = rne(W_inner * q8_inv)
     static constexpr int G = Geo<K>::G, V = Geo<K>::V, D = Geo<K>::D, W = Geo<K>::WORDS;
     static constexpr int P = V == 8 ? 4 : (V == 16 ? 2 : 1);
     static constexpr int STR = V == 8 ? 2 : (V == 16 ? 4 : 1);
@@ -824,8 +877,14 @@ struct ReconstructKernel {
         }
 #pragma unroll
         for (int rr = 0; rr < 16; ++rr)
-            block_store<fp16, 16 * NT>(w + ((size_t)r * 16 + rr) * n_out + strip * NT * 16,
-                                       out.template select<16 * NT, 1>(rr * 16 * NT));
+        {
+            simd<fp16, 16 * NT> row = out.template select<16 * NT, 1>(rr * 16 * NT);
+            if constexpr (std::is_same_v<TW, fp16>)
+                block_store<fp16, 16 * NT>(w + ((size_t)r * 16 + rr) * n_out + strip * NT * 16, row);
+            else
+                block_store<TW, 16 * NT>(w + ((size_t)r * 16 + rr) * n_out + strip * NT * 16,
+                                         convert<TW>(rnde<float>(convert<float>(row) * q8_inv)));
+        }
     }
 };
 
