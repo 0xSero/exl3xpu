@@ -63,25 +63,50 @@ docs/             DESIGN.md (format + kernels), GOAL.md, PROGRESS.md (tuning log
 
 ## Run
 
+Published, attested image (built by `.github/workflows/release-image.yml` from this repo; verify with
+`gh attestation verify oci://ghcr.io/0xsero/exl3xpu@sha256:86276b00c9f0161e7e7ccba1e683ca622679466a5c855e952b375ddbb6ec57c4 -o 0xSero`):
+
 ```bash
-docker build -f docker/Dockerfile -t exl3xpu .
-hf download turboderp/Qwen3.8-27B-exl3 --revision 4.00bpw --local-dir $MODELS/turboderp-Qwen3.8-27B-exl3-4.00bpw
+IMG=ghcr.io/0xsero/exl3xpu@sha256:86276b00c9f0161e7e7ccba1e683ca622679466a5c855e952b375ddbb6ec57c4
+hf download turboderp/Qwen3.8-27B-exl3 --revision 113cf7ab958054860e43fb7f3063b1af19171095 \
+  --local-dir $MODELS/turboderp-Qwen3.8-27B-exl3-4.00bpw
 
-# one replica on GPU 0 (port 8100)
-docker run --rm --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path:ro --group-add render \
-  --shm-size 32g --network host -v $MODELS:/models exl3xpu models/qwen3.8-27b-exl3-4.00bpw --gpu 0 \
-  --model-path /models/turboderp-Qwen3.8-27B-exl3-4.00bpw
-
-# both GPUs, one replica each, least-outstanding proxy on :8000
-docker run ... exl3xpu models/qwen3.8-27b-exl3-4.00bpw --dp --model-path /models/turboderp-Qwen3.8-27B-exl3-4.00bpw
+# one card, OpenAI API on :8000 (tool calls + reasoning parsed)
+docker run --rm --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path:ro --shm-size 32g -p 8000:8000 \
+  -e HF_HUB_OFFLINE=1 -v $MODELS/turboderp-Qwen3.8-27B-exl3-4.00bpw:/models:ro $IMG \
+  models/qwen3.8-27b-exl3-4.00bpw --gpu 0 --port 8000 --model-path /models \
+  -- --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
 ```
 
-`/dev/dri/by-path` must be mounted: oneCCL enumerates devices through it and the engine fails to start
-without it.
+- `/dev/dri/by-path` must be mounted: oneCCL enumerates devices through it. To pin one card on a multi-GPU
+  host, pass only that card's render node (`--device /dev/dri/renderDNNN`) and mount a `by-path` directory that
+  holds only that card's link (this is what the Omarchy local-ai plugin does).
+- Serving config (MTP k=3, fp8 KV in 1600-token blocks, 262,144 context, 16 sequences, 4096-token prefill
+  chunks, 32 images / 4 videos per request, images capped at 4.2 MP) is `models/qwen3.8-27b-exl3-4.00bpw/model.yaml`;
+  `python3 scripts/serve.py models/qwen3.8-27b-exl3-4.00bpw --gpu 0 --print` shows the exact `vllm serve` command.
+- Build it yourself: `docker build -f docker/Dockerfile -t exl3xpu .` (base image pinned by digest), or inside any
+  vLLM XPU environment with oneAPI 2025.3: `scripts/build_ext.sh && pip install -e .`.
+- Both cards as two replicas behind a proxy: `... models/qwen3.8-27b-exl3-4.00bpw --dp --model-path /models`.
 
-Without Docker (inside any vLLM XPU environment with oneAPI 2025.3): `scripts/build_ext.sh && pip install -e .`,
-then `python3 scripts/serve.py models/qwen3.8-27b-exl3-4.00bpw --gpu 0`. Add `--print` to see the exact
-`vllm serve` command.
+## Reproduce the numbers and the gates
+
+```bash
+bench/fetch_corpus.sh                                   # Gutenberg books + HumanEval (not committed)
+# realistic headline panel (thinking on, temperature 0.7)
+python3 bench/sweep.py --base http://localhost:8000 --decode-c 1,2,4,8,16 --classes prose,code --thinking \
+  --corpus real --temperature 0.7 --max-tokens 16384 --skip-prefill
+# synthetic greedy reference panel, and cold prefill
+python3 bench/sweep.py --base http://localhost:8000 --decode-c 1,2,4,8,16 --classes prose,code --thinking --skip-prefill
+python3 bench/sweep.py --base http://localhost:8000 --skip-decode --prefill-c 1 --prefill-ctx 4096,32768,131072,253952
+python3 bench/interleave.py --base http://localhost:8000 --streams 4 --interval 30 --sizes 1024,8192,32768
+python3 bench/vision_bench.py --base http://localhost:8000
+python3 bench/linear_budget.py 1 4 16 64               # kernel-only time of all EXL3 linears
+python3 tests/test_bitexact_xpu.py                     # Gate A1: every kernel path vs exllamav3 reconstruct
+python3 tests/test_needle.py http://localhost:8000 131072; python3 tests/test_vision.py http://localhost:8000
+```
+
+Raw rows of every measurement are in `bench/results/`; every kept and rejected step, with numbers, is in
+`docs/PROGRESS.md`.
 
 ## Adding a model
 
@@ -93,7 +118,9 @@ use data parallel.
 
 ## Status
 
-Candidate recipe (`models/qwen3.8-27b-exl3-4.00bpw/recipe.json`). Weights bit-exact vs exllamav3 on every
-kernel path; logits vs exllamav3 on a 3090: top-1 99.63%, KL 9.8e-5. Vision, video and a 128K needle test
-pass. Open items: C16 does not scale past C8, 256K prefill is bound by fp8 attention, repeated waves. Log in
-`docs/PROGRESS.md`.
+Validated and recommended B70 recipe in [local-ai-registry](https://github.com/0xSero/local-ai-registry)
+(`qwen38-27b-exl3-4bpw-arcb70-vllm-exl3xpu-tp1`). Weights bit-exact vs exllamav3 on every kernel path
+(vector M=1/2/4, DPAS M=3..64); logits vs exllamav3 on a 3090: top-1 99.63%, KL 9.8e-5. Vision (32 numbered
+images read back in order), video and a 128K needle test pass. Open items: 256K prefill (726 tok/s) is bound by
+fp8 attention; at C16 with thinking on ~14 of 16 streams fit the KV pool (MTP k=2 fits all 16 but loses at C1-C8).
+Log in `docs/PROGRESS.md`.

@@ -1,6 +1,6 @@
 {
  "id": "qwen38-27b-exl3-4bpw-arcb70-vllm-exl3xpu-tp1",
- "status": "candidate",
+ "status": "validated (local-ai-registry)",
  "description": "Qwen3.8-27B EXL3 4.00bpw (turboderp) on ONE Intel Arc Pro B70 via vLLM 0.26.1 XPU + the exl3xpu plugin: bit-exact EXL3 trellis decode in ESIMD kernels, MTP speculative decoding (k=3, EXL3 MTP head, pruned draft vocab), fp8 KV cache (272,570 tokens, 1600-token blocks), 262,144-token context, 16 sequences, image + video input. Thinking on: C1 decode 61-77 tok/s, C8 aggregate 294-363 tok/s, C16 344-410 tok/s, cold prefill 1654 (4K) / 1483 (32K) / 1020 (128K) tok/s. Beats the tuned llama.cpp SYCL Q4_K_M recipe on the same card on every cell.",
  "model": {
   "repo": "turboderp/Qwen3.8-27B-exl3",
@@ -26,21 +26,23 @@
    "compute_runtime": "26.31.39395.13",
    "igc": "2.40.13",
    "level_zero_loader": "1.32.0"
-  }
+  },
+  "image": "ghcr.io/0xsero/exl3xpu@sha256:86276b00c9f0161e7e7ccba1e683ca622679466a5c855e952b375ddbb6ec57c4"
  },
  "launch": {
   "config": "models/qwen3.8-27b-exl3-4.00bpw/model.yaml",
-  "command": "python3 scripts/serve.py models/qwen3.8-27b-exl3-4.00bpw --gpu 0",
-  "docker": "docker run --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path:ro --group-add render --shm-size 32g --network host -v $MODELS:/models exl3xpu:0.1.0 models/qwen3.8-27b-exl3-4.00bpw --gpu 0 --model-path /models/turboderp-Qwen3.8-27B-exl3-4.00bpw",
-  "docker_dp": "docker run --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path:ro --group-add render --shm-size 32g --network host -v $MODELS:/models exl3xpu:0.1.0 models/qwen3.8-27b-exl3-4.00bpw --dp --model-path /models/turboderp-Qwen3.8-27B-exl3-4.00bpw"
+  "docker": "docker run --rm --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path:ro --shm-size 32g -p 8000:8000 -e HF_HUB_OFFLINE=1 -v $MODELS/turboderp-Qwen3.8-27B-exl3-4.00bpw:/models:ro ghcr.io/0xsero/exl3xpu@sha256:86276b00c9f0161e7e7ccba1e683ca622679466a5c855e952b375ddbb6ec57c4 models/qwen3.8-27b-exl3-4.00bpw --gpu 0 --port 8000 --model-path /models -- --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3",
+  "local": "python3 scripts/serve.py models/qwen3.8-27b-exl3-4.00bpw --gpu 0"
  },
  "capabilities": {
   "chat": true,
   "reasoning": true,
-  "tools": "untested",
+  "tools": true,
   "vision": true,
   "video": true,
-  "audio": false
+  "audio": false,
+  "images_per_prompt": 32,
+  "videos_per_prompt": 4
  },
  "serving": {
   "max_context_tokens": 262144,
@@ -52,10 +54,11 @@
   "speculative": "mtp k=3 (EXL3 MTP head shipped in the checkpoint), draft lm_head pruned to 512 of 1940 vocab blocks",
   "kv_cache_gib": 8.17,
   "gpu_memory_utilization": 0.965,
-  "max_num_batched_tokens": 8192,
+  "max_num_batched_tokens": 4096,
   "multimodal": {
-   "image_per_prompt": 4,
-   "video_per_prompt": 1
+   "image_per_prompt": 32,
+   "video_per_prompt": 4,
+   "image_max_pixels": 4194304
   }
  },
  "correctness": {
