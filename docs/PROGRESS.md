@@ -332,3 +332,9 @@ Default on in model.yaml.
 Interleave (4 streams, arrivals every 30 s): chunk 4096 repeat ran clean (the earlier DEVICE_LOST did not
 reproduce): 177.1 tok/s, max gap 3.7 s, TTFT 32K 24.8 s. chunk 2048 5-min soak: 175.8 tok/s, max gap 5.6 s,
 TTFT 32K 26.3 s (a multi-second stall persists independent of chunk size; cause TBD).
+Stall forensics (chunk 4096, 240 s, bench/interleave.py now logs largest gaps + arrival timeline): the 3.7 s
+stalls start at 95.9 s and 186.0 s, ~4 s before the 32K arrivals' first tokens (100.1 s, 190.2 s): the final
+prefill chunk of a long prompt, batched with the 4 decode streams, attending over ~28-32K of fp8 KV. The
+block-dequant fp8 prefill path only fires for single-sequence batches, so mixed batches take vLLM FA2 on fp8
+KV (~1.8x slower). Next: extend the fp8-KV prefill patch to mixed batches (prefill rows via block-dequant FA,
+decode rows via the stock path). Decode 177.4 tok/s, TTFT 1K/8K/32K p50 0.94/5.41/25.2 s.

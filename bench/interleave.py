@@ -94,6 +94,17 @@ async def main():
         ts = sorted(t for r in bg if r["stream"] == s for t in r.get("times", []) if w0 <= t < w1)
         per_stream.append(len(ts) / args.window)
         gaps += [b - a for a, b in zip(ts, ts[1:])]
+    # stall forensics: largest gaps (start time relative to t0) next to the arrival timeline
+    big = []
+    for s in range(args.streams):
+        ts = sorted(t for r in bg if r["stream"] == s for t in r.get("times", []) if w0 <= t < w1)
+        big += [(b - a, a - t0, s) for a, b in zip(ts, ts[1:])]
+    big.sort(reverse=True)
+    stalls = [{"gap_s": round(g, 2), "at_s": round(a, 1), "stream": s} for g, a, s in big[:5]]
+    timeline = sorted(({"size": r["size"], "sent_s": round(r["t_send"] - t0, 1),
+                        "first_s": round(r["times"][0] - t0, 1) if r.get("times") else None}
+                       for r in recs if r["kind"] == "arrival"), key=lambda x: x["sent_s"])
+    bg_starts = sorted(round(r["t_send"] - t0, 1) for r in bg if w0 <= r["t_send"] < w1)
     arr = [r for r in recs if r["kind"] == "arrival" and r.get("times")]
     by_size = {}
     for r in arr:
@@ -111,13 +122,16 @@ async def main():
            "arrivals": {str(k): {"n": len(v), "ttft_s_p50": round(pct([a for a, _ in v], 50), 2),
                                  "ttft_s_max": round(max(a for a, _ in v), 2),
                                  "prefill_tok_s_p50": round(pct([b for _, b in v], 50), 1)} for k, v in sorted(by_size.items())},
-           "errors": len(errs)}
+           "errors": len(errs), "stalls": stalls, "arrival_timeline": timeline, "bg_request_starts_s": bg_starts}
     print(f"[{args.label}] {args.streams} streams, arrivals every {args.interval:g}s sizes {sizes}")
     print(f"  background decode: {row['bg_decode_tok_s_total']} tok/s total, {row['bg_decode_tok_s_per_stream_mean']} per stream;"
           f" token gaps p50 {row['bg_gap_ms_p50']} ms, p99 {row['bg_gap_ms_p99']} ms, max {row['bg_gap_ms_max']} ms")
     for k, v in row["arrivals"].items():
         print(f"  arrivals {k:>6} tok: n={v['n']}  TTFT p50 {v['ttft_s_p50']} s (max {v['ttft_s_max']} s)"
               f"  prefill {v['prefill_tok_s_p50']} tok/s")
+    print(f"  largest gaps: {stalls}")
+    print(f"  arrivals (sent -> first token, s): {[(a['size'], a['sent_s'], a['first_s']) for a in timeline]}")
+    print(f"  background request starts (s): {bg_starts}")
     if errs:
         print(f"  errors: {len(errs)}: {errs[:2]}")
     if args.out:
