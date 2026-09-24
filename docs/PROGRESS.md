@@ -390,3 +390,13 @@ DSpark accepts more tokens per step but its 7-token draft pass costs more than i
 An earlier 117 tok/s DSpark prose cell was a degenerate numbered-word output ("final161 worship162 …"), trivially
 draftable; it is discarded. Fixes: pruned MTP draft head is built only when the drafter is MTP (~0.25 GB);
 sweep captures text and flags LOOP (32-word shingle repeat ratio > 0.2).
+
+## 2026-09-24: dynamic draft length (k=3 at <=8 reqs, k=2 above) — BLOCKED on XPU
+vLLM 0.26 `speculative_config.num_speculative_tokens_per_batch_size` forces cudagraph_mode FULL_DECODE_ONLY ->
+PIECEWISE ("Dynamic speculative decoding changes the target verification length"); piecewise capture fails on XPU
+with UR OUT_OF_RESOURCES at startup. Options left: V2 model runner (untested on XPU) or capturing full graphs per k.
+
+## 2026-09-24: prefix caching was OFF (found while reading the dynamic-k log)
+`enable_prefix_caching=False` in the bench server and in the running service: vLLM 0.26 does not enable it by
+default for hybrid GDN models, and model.yaml never set it. Now explicit `enable_prefix_caching: true` (with
+`mamba_cache_mode: align`). Re-measuring the panel + a same-prompt TTFT/hit-counter check.
