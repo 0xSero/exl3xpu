@@ -261,7 +261,98 @@ def patch_xpu_block_size() -> bool:
     return True
 
 
+# ------------------------------------------------------------------------------------------------
+# align_sync: with prefix caching on, hybrid models run mamba_cache_mode "align", and GPUModelRunner._prepare_inputs
+# then calls num_accepted_tokens_event.synchronize() EVERY step (the non-align async path skips it). The host
+# cannot prepare step N+1 while step N runs: py-spy put 82% of EngineCore time on that line and prose decode
+# lost 20-30%. The CPU counts are only needed when preprocess_mamba copies a request's GDN state into a new
+# block (a block boundary crossing, ~1 in 400 steps at block 1600) or when the batch rows changed; otherwise the
+# GPU copy (written by postprocess_mamba_align_gpu) is already correct. The patch skips the sync and the two
+# CPU->GPU re-copies of the (then stale) counts on exactly those steps.
+
+ALIGN_SKIP_MARGIN = 16    # tokens of slack on num_computed_tokens (async corrections, draft rejections)
+
+
+def _align_can_skip(runner, scheduler_output, num_reqs) -> bool:
+    if not getattr(runner, "use_async_scheduling", False) or os.environ.get("EXL3_ALIGN_SYNC_SKIP", "0") != "1":
+        return False
+    req_ids = list(runner.input_batch.req_ids[:num_reqs])
+    prev = getattr(runner, "_exl3_prev_req_ids", None)
+    runner._exl3_prev_req_ids = req_ids
+    if prev != req_ids:
+        return False
+    try:
+        bs = runner._get_mamba_bufs().preprocess.mamba_spec.block_size
+    except Exception:
+        return False
+    nst = scheduler_output.num_scheduled_tokens
+    for rid in req_ids:
+        prev_idx = runner.mamba_state_idx.get(rid)
+        st = runner.requests.get(rid)
+        if prev_idx is None or st is None:
+            return False
+        n = nst.get(rid, 0)
+        lo = max(st.num_computed_tokens - ALIGN_SKIP_MARGIN, 0) + n
+        hi = st.num_computed_tokens + ALIGN_SKIP_MARGIN + n
+        if -(-lo // bs) - 1 != prev_idx or -(-hi // bs) - 1 != prev_idx:
+            return False
+    return True
+
+
+_ALIGN_SYNC_OLD = """        if needs_cpu_accepted_counts:
+            assert self.num_accepted_tokens_event is not None
+            self.num_accepted_tokens_event.synchronize()"""
+_ALIGN_SYNC_NEW = """        self._exl3_skipped_sync = bool(needs_cpu_accepted_counts) and _align_can_skip(
+            self, scheduler_output, num_reqs)
+        if self._exl3_skipped_sync:
+            self._exl3_skips = getattr(self, "_exl3_skips", 0) + 1
+        elif needs_cpu_accepted_counts:
+            assert self.num_accepted_tokens_event is not None
+            self.num_accepted_tokens_event.synchronize()"""
+_ALIGN_RESYNC_OLD = """                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                )
+                self.num_accepted_tokens.copy_to_gpu(num_reqs)"""
+_ALIGN_RESYNC_NEW = """                if not getattr(self, "_exl3_skipped_sync", False):
+                    self.num_accepted_tokens.np[:num_reqs] = (
+                        self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                    )
+                    self.num_accepted_tokens.copy_to_gpu(num_reqs)"""
+
+
+def patch_align_sync() -> bool:
+    try:
+        from vllm.v1.worker import gpu_model_runner as gmr
+    except Exception as e:  # noqa
+        logger.warning("exl3xpu: gpu_model_runner not importable (%s); align sync patch skipped", e)
+        return False
+    cls = gmr.GPUModelRunner
+    if getattr(cls, "_exl3_align_patched", False):
+        return False
+    fixes = []
+    for name, old, new in (("_prepare_inputs", _ALIGN_SYNC_OLD, _ALIGN_SYNC_NEW),
+                           ("execute_model", _ALIGN_RESYNC_OLD, _ALIGN_RESYNC_NEW)):
+        src = textwrap.dedent(inspect.getsource(getattr(cls, name)))
+        old_d, new_d = textwrap.dedent(old), textwrap.dedent(new)
+        # sources are dedented by 4 (method level); match the snippets at that indentation
+        old_d = "\n".join(l[4:] for l in old.split("\n"))
+        new_d = "\n".join(l[4:] for l in new.split("\n"))
+        if src.count(old_d) != 1 or "super()" in src:
+            logger.warning("exl3xpu: GPUModelRunner.%s source changed; align sync patch skipped", name)
+            return False
+        fixes.append((name, src.replace(old_d, new_d)))
+    ns = dict(vars(gmr))
+    ns["_align_can_skip"] = _align_can_skip
+    for name, src in fixes:
+        exec(compile(src, f"<exl3xpu patched {gmr.__file__}:{name}>", "exec"), ns)
+        setattr(cls, name, ns[name])
+    cls._exl3_align_patched = True
+    logger.info("exl3xpu: align-mode accepted-token sync skipped except on block crossings / batch changes")
+    return True
+
+
 def apply_all():
+    patch_align_sync()
     patch_gdn_mask_index()
     patch_fp8kv_prefill()
     patch_xpu_block_size()

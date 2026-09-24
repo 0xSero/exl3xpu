@@ -400,3 +400,14 @@ with UR OUT_OF_RESOURCES at startup. Options left: V2 model runner (untested on 
 `enable_prefix_caching=False` in the bench server and in the running service: vLLM 0.26 does not enable it by
 default for hybrid GDN models, and model.yaml never set it. Now explicit `enable_prefix_caching: true` (with
 `mamba_cache_mode: align`). Re-measuring the panel + a same-prompt TTFT/hit-counter check.
+
+### Prefix caching cost: investigated (2026-09-24)
+- t=0.7 panel with caching on showed prose C1/C8/C16 -23/-33/-22% (one wave, few samples, card 0 service live).
+- Greedy A/B, same prompts: prose C8 caching off 334.0, on 338.2 tok/s -> **no decode cost**. The t=0.7 drop does
+  not reproduce; greedy prose C1 loops on its prompt (LOOP flag), so C1 needs the t=0.7 re-measure.
+- py-spy: with caching on, 82% of EngineCore time blocks on `num_accepted_tokens_event.synchronize()`
+  (gpu_model_runner.py:2127, align mode only); with caching off the same wait sits in XPU graph replay (78%).
+  The wait moves, the step time does not.
+- `patch_align_sync` (skip that sync except on GDN block crossings / batch changes): greedy 7/8 exact vs
+  unpatched, same as unpatched-vs-unpatched 7/8 (one near-tie flip, prompt 1) -> correct; speed C8 prose
+  337.7 vs 337.8, code 332.6 vs 331.5 -> no gain. REJECTED as default, kept opt-in (EXL3_ALIGN_SYNC_SKIP=1).
