@@ -15,7 +15,7 @@ host kernel 7.1.8 (xe), compute-runtime 26.31.39395.13, IGC 2.40.13, Level Zero 
 
 Config [`models/qwen3.8-27b-exl3-4.00bpw/model.yaml`](models/qwen3.8-27b-exl3-4.00bpw/model.yaml):
 MTP speculative decoding k=3 (the EXL3 MTP head shipped in the checkpoint, draft lm_head pruned to 512 vocab
-blocks), fp8 KV cache (267,761 tokens, 8.2 GiB), max context 262,144, 16 sequences, image (4/prompt) and
+blocks), fp8 KV cache (272,570 tokens in 1600-token blocks), max context 262,144, 16 sequences, image (4/prompt) and
 video (1/prompt) input. Model revision `113cf7ab958054860e43fb7f3063b1af19171095` (branch `4.00bpw`).
 
 Decode with thinking on, aggregate tok/s. C16 is KV-bound (about 10 of 16 long-reasoning streams fit the fp8 pool). Cold unique tokenizer-sized prompts, greedy, no output
@@ -23,11 +23,11 @@ cap, 60-90 s sustained windows (`bench/sweep.py`); raw rows in `bench/results/20
 
 | C | prose (thinking on) | code (thinking on) |
 |---|---|---|
-| 1 | 76.9 | 61.4 |
-| 2 | 139.8 | 117.2 |
-| 4 | 245.7 | 199.4 |
-| 8 | 367.0 | 280.1 |
-| 16 | 349.1 | 294.6 |
+| 1 | 76.6 | 63.3 |
+| 2 | 136.2 | 115.3 |
+| 4 | 248.7 | 196.3 |
+| 8 | 362.6 | 294.3 |
+| 16 | 409.9 | 344.2 |
 
 Cold prefill, one request: 4K **1589**, 32K **1497**, 128K **1049**, 254K **763** tok/s.
 
