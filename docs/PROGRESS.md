@@ -349,3 +349,5 @@ Prefill by chunk (cold, one request): 2048: 4K 1576, 32K 1411, 128K 954 (breaks 
 MTP k=2 at C16 thinking on (exact KV blocks): all 16 streams resident (84-93% KV); prose 409.9 -> 460.2, code
 344.2 -> 383.5 agg (+11-12%). k=2 loses at C1-C4 (C1 prose 61.9 vs 70.3, C4 219.5 vs 237.5), and dynamic SD
 cannot switch k on this driver, so default stays k=3; k=2 is the many-users variant.
+gpu_memory_utilization 0.985: launch refused (30.97 of 31.89 GiB free at startup). 0.970: KV pool 272,570 -> 288,954
+tokens but still 13-14 of 16 streams resident; C16 thinking prose 409.5, code 335.4 (flat). Rejected; 0.965 stays.
