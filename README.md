@@ -21,13 +21,16 @@ video (1/prompt) input. Model revision `113cf7ab958054860e43fb7f3063b1af19171095
 Decode with thinking on, aggregate tok/s. C16 is KV-bound (about 10 of 16 long-reasoning streams fit the fp8 pool). Cold unique tokenizer-sized prompts, greedy, no output
 cap, 60-90 s sustained windows (`bench/sweep.py`); raw rows in `bench/results/2026-09-23.jsonl`.
 
-| C | prose (thinking on) | code (thinking on) |
+Realistic workload (Gutenberg books for prose, HumanEval for code, temperature 0.7, thinking on, up to 16K output),
+aggregate tok/s; the synthetic greedy panel (random-word prompts, fixed tasks, 2K cap) in brackets:
+
+| C | prose | code |
 |---|---|---|
-| 1 | 76.6 | 63.3 |
-| 2 | 136.2 | 115.3 |
-| 4 | 248.7 | 196.3 |
-| 8 | 362.6 | 294.3 |
-| 16 | 409.9 | 344.2 |
+| 1 | **91.2** (76.6) | **66.1** (63.3) |
+| 2 | **151.4** (136.2) | **125.3** (115.3) |
+| 4 | **262.6** (248.7) | **212.9** (196.3) |
+| 8 | **357.1** (362.6) | **321.7** (294.3) |
+| 16 | **365.2** (409.9) | **350.0** (344.2) |
 
 Cold prefill, one request: 4K **1,654**, 32K **1,483**, 128K **1,020**, 254K **726** tok/s (4096-token prefill chunks).
 

@@ -16,7 +16,7 @@ rec = json.load(open(os.path.join(ROOT, "models/qwen3.8-27b-exl3-4.00bpw/recipe.
 CS = [1, 2, 4, 8, 16]
 series = {}
 for x in rec["speed_sweep"]:
-    if x["kind"] == "decode" and not x.get("context_tokens"):
+    if x["kind"] == "decode" and not x.get("context_tokens") and x.get("corpus", "noise") == "real":
         series.setdefault((x["content_class"], x["thinking"]), {})[x["concurrency"]] = x["decode_tok_s_total"]
 pre = {x["context_tokens"]: x["prefill_tok_s_total"] for x in rec["speed_sweep"] if x["kind"] == "prefill"}
 
