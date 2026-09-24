@@ -379,3 +379,14 @@ Vision robustness: a single 4096x4096 image (the processor's 16.7 MP max, ~65K V
 (UR OUT_OF_RESOURCES in the vision rotary embedding). mm_processor_kwargs size.longest_edge 4194304 now downscales
 large images (~4.1K tokens each): 1x4096px TTFT 3.72 s, 2x4096px 7.54 s, decode 69-73 tok/s; 32 images @512px read
 back in order; video and vision tests PASS; 0 OUT_OF_RESOURCES.
+
+## 2026-09-24: DSpark vs MTP re-test at temperature 1.0 (realistic corpus, C1, thinking on) — DSpark REJECTED again
+Same prompts, texts captured (`--dump-text`), 120 s window, fp8 KV. DSpark only fits max_model_len 131072 (its draft KV).
+| draft | prose tok/s | code tok/s | accept len |
+|---|---|---|---|
+| MTP k=3 (default) | **82.9** | **67.4** | 2.85 |
+| DSpark k=7 | 73.6 | 58.0 | 3.26 |
+DSpark accepts more tokens per step but its 7-token draft pass costs more than it saves: -11% prose, -14% code.
+An earlier 117 tok/s DSpark prose cell was a degenerate numbered-word output ("final161 worship162 …"), trivially
+draftable; it is discarded. Fixes: pruned MTP draft head is built only when the drafter is MTP (~0.25 GB);
+sweep captures text and flags LOOP (32-word shingle repeat ratio > 0.2).
