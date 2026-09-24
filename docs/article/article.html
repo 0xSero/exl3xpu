@@ -1,0 +1,523 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EXL3 on Arc B70</title><style>
+:root{--bg:#ffffff;--fg:#1f2328;--muted:#59636e;--rule:#d1d9e0;--code:#f6f8fa;--link:#0969da;
+--c1:#1f6feb;--c2:#8250df;--c3:#9aa4ae;--c4:#bf8700;--c5:#1a7f37;--c6:#cf222e;--grid:#e6ebf0}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#0d1117;--fg:#e6edf3;--muted:#9198a1;--rule:#30363d;
+--code:#161b22;--link:#4493f8;--c1:#4493f8;--c2:#ab7df8;--c3:#6e7681;--c4:#d29922;--c5:#3fb950;--c6:#f85149;--grid:#21262d}}
+:root[data-theme="dark"]{--bg:#0d1117;--fg:#e6edf3;--muted:#9198a1;--rule:#30363d;--code:#161b22;--link:#4493f8;
+--c1:#4493f8;--c2:#ab7df8;--c3:#6e7681;--c4:#d29922;--c5:#3fb950;--c6:#f85149;--grid:#21262d}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+main{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:1.9em;border-bottom:1px solid var(--rule);padding-bottom:.3em;margin:.2em 0 .4em;font-weight:600}
+h2{font-size:1.4em;border-bottom:1px solid var(--rule);padding-bottom:.25em;margin-top:2em;font-weight:600}
+h3{font-size:1.1em;margin-top:1.5em;font-weight:600}
+a{color:var(--link)}
+p.lede{color:var(--muted)}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em;background:var(--code);border-radius:4px}
+code{padding:.1em .35em}
+pre{padding:12px;overflow-x:auto;line-height:1.45}
+table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.92em;display:block;overflow-x:auto}
+th,td{border:1px solid var(--rule);padding:5px 9px;text-align:left;vertical-align:top}
+th{background:var(--code);font-weight:600}
+td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.toc{border:1px solid var(--rule);background:var(--code);padding:10px 16px;display:inline-block;margin:.5em 0 1em}
+.toc ol{margin:.3em 0;padding-left:1.3em}
+.chart{width:100%;height:auto;display:block;margin:1em 0 .2em}
+.chart .lbl{font-size:12px;fill:var(--fg)}
+.chart .val,.chart .bv{font-size:11px;fill:var(--muted);font-variant-numeric:tabular-nums}
+.chart .tick{font-size:10.5px;fill:var(--muted)}
+.chart .inbar{font-size:11px;fill:#fff}
+.chart .grid{stroke:var(--grid);stroke-width:1}
+.chart .b1{fill:var(--c1)}.chart .b2{fill:var(--c2)}.chart .b3{fill:var(--c3)}.chart .b4{fill:var(--c4)}.chart .b5{fill:var(--c5)}.chart .b6{fill:var(--c6)}
+.chart .ln{stroke-width:2.2}.chart .ln.s1{stroke:var(--c3)}.chart .ln.s2{stroke:var(--c1)}
+.chart .dot.s1{fill:var(--c3)}.chart .dot.s2{fill:var(--c1)}
+p.cap{font-size:.86em;color:var(--muted);margin:.2em 0 1.4em}
+.legend2{font-size:.85em;color:var(--muted)}
+.box{border-left:3px solid var(--rule);padding:.2em 0 .2em 12px;color:var(--muted)}
+.ok{color:var(--c5)}.bad{color:var(--c6)}
+.diagram text{font-size:12px;fill:var(--fg)}.diagram .bx{fill:var(--code);stroke:var(--rule)}.diagram .ar{stroke:var(--muted);stroke-width:1.4;fill:none;marker-end:url(#arw)}
+.diagram .sub{font-size:10.5px;fill:var(--muted)}
+</style></head><body>
+<main>
+<h1>Porting EXL3 to Intel Arc: Qwen3.8-27B on one B70</h1>
+<p class="lede">How exllamav3's trellis-quantized models were made to run on an Intel Arc Pro B70 (Battlemage, 32 GB) inside vLLM,
+bit-exact with the CUDA reference, and then pushed from 7 to 91 tokens per second for a single stream. Written 24 September 2026.
+Code: <a href="https://github.com/0xSero/exl3xpu">github.com/0xSero/exl3xpu</a>. Recipe:
+<a href="https://github.com/0xSero/local-ai-registry/pull/95">local-ai-registry #95</a>.</p>
+
+<div class="toc"><b>Contents</b><ol>
+<li><a href="#result">Result</a></li><li><a href="#format">The EXL3 format</a></li><li><a href="#arch">Architecture of the port</a></li>
+<li><a href="#kernels">Kernel work</a></li><li><a href="#serving">Serving work</a></li><li><a href="#drafts">Speculative decoding</a></li>
+<li><a href="#correct">Correctness</a></li><li><a href="#live">Against the live service</a></li><li><a href="#alu">Why it is ALU-bound</a></li>
+<li><a href="#rejected">What did not work</a></li><li><a href="#hw">Hardware finding</a></li><li><a href="#recipe">Canonical recipe</a></li><li><a href="#open">Open items</a></li>
+</ol></div>
+
+<h2 id="result">Result</h2>
+<p>turboderp's <code>Qwen3.8-27B-exl3</code> at 4.00 bits per weight (14.9 GiB) serves on one B70 with a 262,144-token context,
+16 concurrent sequences, MTP speculative decoding, an fp8 KV cache and image/video input. On a realistic workload (Gutenberg
+prose, HumanEval code, temperature 0.7, thinking on) it decodes <b>91.2 tok/s</b> for one prose stream and <b>365 tok/s</b>
+aggregate at 16 streams, and prefills a cold 128K prompt at ~1,020 tok/s. The tuned llama.cpp SYCL Q4_K_M recipe on the same
+card does 25.0 and 56.0.</p>
+<svg viewBox="0 0 640 284" role="img" class="chart">
+<line x1="50" y1="220.0" x2="630" y2="220.0" class="grid"/>
+<text x="44" y="224.0" class="tick" text-anchor="end">0</text>
+<line x1="50" y1="170.0" x2="630" y2="170.0" class="grid"/>
+<text x="44" y="174.0" class="tick" text-anchor="end">102</text>
+<line x1="50" y1="120.0" x2="630" y2="120.0" class="grid"/>
+<text x="44" y="124.0" class="tick" text-anchor="end">205</text>
+<line x1="50" y1="70.0" x2="630" y2="70.0" class="grid"/>
+<text x="44" y="74.0" class="tick" text-anchor="end">307</text>
+<line x1="50" y1="20.0" x2="630" y2="20.0" class="grid"/>
+<text x="44" y="24.0" class="tick" text-anchor="end">409</text>
+<rect x="62.8" y="207.8" width="43.2" height="12.2" class="b3"/>
+<text x="84.4" y="203.8" class="bv" text-anchor="middle">25</text>
+<rect x="108.0" y="175.4" width="43.2" height="44.6" class="b1"/>
+<text x="129.6" y="171.4" class="bv" text-anchor="middle">91</text>
+<text x="108.0" y="238" class="lbl" text-anchor="middle">C1</text>
+<text x="201.4" y="216" class="tick" text-anchor="middle">n/a</text>
+<rect x="224.0" y="146.0" width="43.2" height="74.0" class="b1"/>
+<text x="245.6" y="142.0" class="bv" text-anchor="middle">151</text>
+<text x="224.0" y="238" class="lbl" text-anchor="middle">C2</text>
+<text x="317.4" y="216" class="tick" text-anchor="middle">n/a</text>
+<rect x="340.0" y="91.6" width="43.2" height="128.4" class="b1"/>
+<text x="361.6" y="87.6" class="bv" text-anchor="middle">263</text>
+<text x="340.0" y="238" class="lbl" text-anchor="middle">C4</text>
+<rect x="410.8" y="192.2" width="43.2" height="27.8" class="b3"/>
+<text x="432.4" y="188.2" class="bv" text-anchor="middle">57</text>
+<rect x="456.0" y="45.4" width="43.2" height="174.6" class="b1"/>
+<text x="477.6" y="41.4" class="bv" text-anchor="middle">357</text>
+<text x="456.0" y="238" class="lbl" text-anchor="middle">C8</text>
+<rect x="526.8" y="192.6" width="43.2" height="27.4" class="b3"/>
+<text x="548.4" y="188.6" class="bv" text-anchor="middle">56</text>
+<rect x="572.0" y="41.4" width="43.2" height="178.6" class="b1"/>
+<text x="593.6" y="37.4" class="bv" text-anchor="middle">365</text>
+<text x="572.0" y="238" class="lbl" text-anchor="middle">C16</text>
+<rect x="50" y="268" width="12" height="12" class="b3"/>
+<text x="67" y="278" class="lbl">llama.cpp Q4_K_M</text>
+<rect x="219" y="268" width="12" height="12" class="b1"/>
+<text x="236" y="278" class="lbl">EXL3 (this work)</text>
+<text x="8" y="14" class="tick">aggregate tok/s, prose, thinking on</text>
+</svg><p class="cap">Same card. llama.cpp SYCL Q4_K_M is the tuned registry recipe (C1 25.0, C8 56.8, C16 56.0). EXL3 row is the realistic panel (Gutenberg prose, temperature 0.7). n/a = not measured for llama.cpp.</p>
+<svg viewBox="0 0 640 240" role="img" class="chart">
+<line x1="50" y1="170.0" x2="620" y2="170.0" class="grid"/>
+<text x="44" y="174.0" class="tick" text-anchor="end">0</text>
+<line x1="50" y1="132.5" x2="620" y2="132.5" class="grid"/>
+<text x="44" y="136.5" class="tick" text-anchor="end">25</text>
+<line x1="50" y1="95.0" x2="620" y2="95.0" class="grid"/>
+<text x="44" y="99.0" class="tick" text-anchor="end">50</text>
+<line x1="50" y1="57.5" x2="620" y2="57.5" class="grid"/>
+<text x="44" y="61.5" class="tick" text-anchor="end">75</text>
+<line x1="50" y1="20.0" x2="620" y2="20.0" class="grid"/>
+<text x="44" y="24.0" class="tick" text-anchor="end">100</text>
+<polyline fill="none" class="ln s1" points="50.0,159.1 113.3,148.5 176.7,127.5 240.0,127.4 303.3,113.3 366.7,97.9 430.0,89.4 493.3,85.4"/>
+<circle cx="50.0" cy="159.1" r="3.5" class="dot s1"/>
+<text x="50.0" y="151.1" class="bv" text-anchor="middle">7.3</text>
+<circle cx="113.3" cy="148.5" r="3.5" class="dot s1"/>
+<text x="113.3" y="140.5" class="bv" text-anchor="middle">14.4</text>
+<circle cx="176.7" cy="127.5" r="3.5" class="dot s1"/>
+<text x="176.7" y="119.5" class="bv" text-anchor="middle">28.4</text>
+<circle cx="240.0" cy="127.4" r="3.5" class="dot s1"/>
+<text x="240.0" y="119.4" class="bv" text-anchor="middle">28.5</text>
+<circle cx="303.3" cy="113.3" r="3.5" class="dot s1"/>
+<text x="303.3" y="105.3" class="bv" text-anchor="middle">37.9</text>
+<circle cx="366.7" cy="97.9" r="3.5" class="dot s1"/>
+<text x="366.7" y="89.9" class="bv" text-anchor="middle">48.2</text>
+<circle cx="430.0" cy="89.4" r="3.5" class="dot s1"/>
+<text x="430.0" y="81.4" class="bv" text-anchor="middle">53.9</text>
+<circle cx="493.3" cy="85.4" r="3.5" class="dot s1"/>
+<text x="493.3" y="77.4" class="bv" text-anchor="middle">56.6</text>
+<polyline fill="none" class="ln s2" points="430.0,67.4 493.3,64.9 556.7,55.0 620.0,33.6"/>
+<circle cx="430.0" cy="67.4" r="3.5" class="dot s2"/>
+<text x="430.0" y="59.4" class="bv" text-anchor="middle">68.6</text>
+<circle cx="493.3" cy="64.9" r="3.5" class="dot s2"/>
+<text x="493.3" y="56.9" class="bv" text-anchor="middle">70.3</text>
+<circle cx="556.7" cy="55.0" r="3.5" class="dot s2"/>
+<text x="556.7" y="47.0" class="bv" text-anchor="middle">76.9</text>
+<circle cx="620.0" cy="33.6" r="3.5" class="dot s2"/>
+<text x="620.0" y="25.6" class="bv" text-anchor="middle">91.2</text>
+<text transform="translate(50.0,184) rotate(28)" class="tick">Triton eager</text>
+<text transform="translate(113.3,184) rotate(28)" class="tick">ESIMD GEMV</text>
+<text transform="translate(176.7,184) rotate(28)" class="tick">+ XPU graphs</text>
+<text transform="translate(240.0,184) rotate(28)" class="tick">+ DPAS</text>
+<text transform="translate(303.3,184) rotate(28)" class="tick">+ MTP k=3</text>
+<text transform="translate(366.7,184) rotate(28)" class="tick">+ pruned draft</text>
+<text transform="translate(430.0,184) rotate(28)" class="tick">split-K retune</text>
+<text transform="translate(493.3,184) rotate(28)" class="tick">split-K MB16 + regs</text>
+<text transform="translate(556.7,184) rotate(28)" class="tick">K=6 planar</text>
+<text transform="translate(620.0,184) rotate(28)" class="tick">realistic corpus</text>
+<text x="8" y="14" class="tick">tok/s</text>
+</svg><p class="cap">Single-stream (C1) decode, one B70, by milestone. Two panels are mixed on purpose: the early steps were measured thinking-off on synthetic prompts; from the split-K retune on, the headline is thinking-on. The last point is the realistic Gutenberg panel at temperature 0.7 (91.2 tok/s), which drafts better than random-word prompts.</p>
+
+<h2 id="format">The EXL3 format</h2>
+<p>EXL3 stores each linear layer as 16&times;16 tiles of K-bit codes (K=4 for this model's body, 6 for its lm_head). A tile is a
+bitstream of 256&middot;K bits; weight <i>t</i> of the tile is decoded from the 16-bit window that ends at bit (t+1)&middot;K,
+so neighbouring weights share bits &mdash; a trellis. The 16-bit state is mapped to a weight by a codebook; this checkpoint uses
+<code>mul1</code>: multiply the state by <code>0x83DCD12D</code>, sum the four bytes of the product, and read
+<code>1024 + bytesum</code> as an fp16 value that is scaled by one fused multiply-add. Inputs and outputs are rotated by
+randomized Hadamard transforms (<code>suh</code>/<code>svh</code>), which is what makes such coarse codes accurate.</p>
+
+<svg viewBox="0 0 760 250" class="chart diagram" role="img">
+<defs><marker id="arw" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+<rect class="bx" x="10" y="20" width="150" height="62" rx="4"/><text x="85" y="44" text-anchor="middle">trellis words</text><text class="sub" x="85" y="62" text-anchor="middle">16x16 tile = 256*K bits</text><text class="sub" x="85" y="75" text-anchor="middle">(K=4: 32 uint32)</text>
+<rect class="bx" x="200" y="20" width="150" height="62" rx="4"/><text x="275" y="44" text-anchor="middle">16-bit state</text><text class="sub" x="275" y="62" text-anchor="middle">window ending at bit (t+1)K</text><text class="sub" x="275" y="75" text-anchor="middle">shift / or / mask</text>
+<rect class="bx" x="390" y="20" width="160" height="62" rx="4"/><text x="470" y="44" text-anchor="middle">mul1 codebook</text><text class="sub" x="470" y="62" text-anchor="middle">x = st * 0x83DCD12D</text><text class="sub" x="470" y="75" text-anchor="middle">dp4a: fp16(1024 + bytesum)</text>
+<rect class="bx" x="590" y="20" width="160" height="62" rx="4"/><text x="670" y="44" text-anchor="middle">fp16 weight</text><text class="sub" x="670" y="62" text-anchor="middle">h*c1 + c2 (one hfma,</text><text class="sub" x="670" y="75" text-anchor="middle">bit-exact w/ exllamav3)</text>
+<path class="ar" d="M160,51 L198,51"/><path class="ar" d="M350,51 L388,51"/><path class="ar" d="M550,51 L588,51"/>
+<rect class="bx" x="120" y="150" width="200" height="70" rx="4"/><text x="220" y="174" text-anchor="middle">GemvKernel (M&#8804;2)</text><text class="sub" x="220" y="192" text-anchor="middle">vector FMA, split-K 1024 threads</text><text class="sub" x="220" y="207" text-anchor="middle">fp16 partial dots per tile-row</text>
+<rect class="bx" x="440" y="150" width="220" height="70" rx="4"/><text x="550" y="174" text-anchor="middle">DpasKernel (M=3..64)</text><text class="sub" x="550" y="192" text-anchor="middle">decoded tile = one XMX B operand</text><text class="sub" x="550" y="207" text-anchor="middle">MB 8/16/24/32/40/48/64 row blocks</text>
+<path class="ar" d="M670,82 L560,148"/><path class="ar" d="M670,82 L240,148"/>
+<text class="sub" x="10" y="118">input Hadamard (suh) &#8594; kernel &#8594; split-K reduce + output Hadamard (svh)</text>
+</svg>
+<p class="cap">The per-weight path. Every weight is a pure function of a 16-bit window of the bitstream; the whole port is
+about computing that function bit-exactly and fast enough on Xe2's vector ALUs, then feeding the XMX (DPAS) units.</p>
+
+<p>Two properties drive everything that follows: every weight costs a handful of integer instructions to decode, and there is
+no shortcut &mdash; the exact fp16 values must match exllamav3's CUDA <code>decode_3inst</code> bit for bit.</p>
+
+<h2 id="arch">Architecture of the port</h2>
+<table><thead><tr><th>Piece</th><th>What it does</th></tr></thead><tbody>
+<tr><td><code>exl3xpu/vllm_plugin.py</code></td><td>Registers an <code>exl3</code> quantization method with vLLM: detects EXL3 modules from
+<code>.trellis</code> entries in the weight index (including the MTP head that the quantization config omits), fuses shards
+(qkvz, gate_up), handles the 6-bit lm_head and the pruned draft head.</td></tr>
+<tr><td><code>exl3xpu/ref.py</code></td><td>Pure-PyTorch decoder: the specification, validated bit-exact against exllamav3's CUDA kernels on a 3090.</td></tr>
+<tr><td><code>csrc/exl3_esimd.h</code>, <code>csrc/exl3_ops.sycl</code></td><td>ESIMD kernels for Xe2: Hadamard in/out, the vector GEMV,
+the DPAS GEMM, a reconstruct kernel for prefill (dequantize to fp16, then oneDNN GEMM), split-K reduction. One C++ custom op
+per linear keeps host cost at ~34 &micro;s per call.</td></tr>
+<tr><td><code>exl3xpu/vllm_patches.py</code></td><td>Source-checked fixes to vLLM internals that matter on XPU (host-sync removal in GDN
+metadata, fp8-KV prefill attention, exact KV block size). Each patch verifies the exact source it expects and skips otherwise.</td></tr>
+<tr><td><code>models/qwen3.8-27b-exl3-4.00bpw/</code></td><td><code>model.yaml</code> (the serving config) and <code>recipe.json</code> (what it measured).</td></tr>
+</tbody></table>
+<p>vLLM 0.26.1 XPU supplies everything else: scheduling, paged KV, the Gated DeltaNet (GDN) and attention kernels, the
+OpenAI API, tool-call and reasoning parsers. The model is hybrid: 48 GDN linear-attention layers plus 16 full-attention
+layers, which shapes the cache behaviour described below.</p>
+
+<h2 id="kernels">Kernel work</h2>
+<h3>Low concurrency: the vector GEMV and the M=4 verify</h3>
+<p>The first working version was Triton: 7.3 tok/s. The ESIMD GEMV decodes the trellis with <code>dp4a</code> computing
+<code>0x6400 + bytesum</code> in one instruction &mdash; its low 16 bits <i>are</i> the fp16 value 1024+bytesum &mdash; and
+accumulates short fp16 partial dot products per tile-row before widening to fp32. With XPU graphs that reached 28 tok/s. From
+there most gains came from not wasting work: sizing split-K to the machine instead of to 4096 threads, building each tile's
+"previous word" by shifting registers instead of a second load, and de-interleaving the 6-bit lm_head's words once per tile so
+the decoder reads contiguous planes (Xe regions only stride by powers of two; stride-3 gathers had cost two moves per value).</p>
+<svg viewBox="0 0 640 240" role="img" class="chart">
+<line x1="50" y1="170.0" x2="620" y2="170.0" class="grid"/>
+<text x="44" y="174.0" class="tick" text-anchor="end">0</text>
+<line x1="50" y1="132.5" x2="620" y2="132.5" class="grid"/>
+<text x="44" y="136.5" class="tick" text-anchor="end">12</text>
+<line x1="50" y1="95.0" x2="620" y2="95.0" class="grid"/>
+<text x="44" y="99.0" class="tick" text-anchor="end">25</text>
+<line x1="50" y1="57.5" x2="620" y2="57.5" class="grid"/>
+<text x="44" y="61.5" class="tick" text-anchor="end">37</text>
+<line x1="50" y1="20.0" x2="620" y2="20.0" class="grid"/>
+<text x="44" y="24.0" class="tick" text-anchor="end">50</text>
+<polyline fill="none" class="ln s1" points="50.0,69.6 164.0,71.7 278.0,71.7 392.0,81.7 506.0,81.1 620.0,87.5"/>
+<circle cx="50.0" cy="69.6" r="3.5" class="dot s1"/>
+<text x="50.0" y="61.6" class="bv" text-anchor="middle">33.2</text>
+<circle cx="164.0" cy="71.7" r="3.5" class="dot s1"/>
+<text x="164.0" y="63.7" class="bv" text-anchor="middle">32.5</text>
+<circle cx="278.0" cy="71.7" r="3.5" class="dot s1"/>
+<text x="278.0" y="63.7" class="bv" text-anchor="middle">32.5</text>
+<circle cx="392.0" cy="81.7" r="3.5" class="dot s1"/>
+<text x="392.0" y="73.7" class="bv" text-anchor="middle">29.2</text>
+<circle cx="506.0" cy="81.1" r="3.5" class="dot s1"/>
+<text x="506.0" y="73.1" class="bv" text-anchor="middle">29.4</text>
+<circle cx="620.0" cy="87.5" r="3.5" class="dot s1"/>
+<text x="620.0" y="79.5" class="bv" text-anchor="middle">27.3</text>
+<polyline fill="none" class="ln s2" points="50.0,46.0 164.0,33.6 278.0,62.1 392.0,63.6 506.0,69.0 620.0,74.2"/>
+<circle cx="50.0" cy="46.0" r="3.5" class="dot s2"/>
+<text x="50.0" y="38.0" class="bv" text-anchor="middle">41</text>
+<circle cx="164.0" cy="33.6" r="3.5" class="dot s2"/>
+<text x="164.0" y="25.6" class="bv" text-anchor="middle">45.1</text>
+<circle cx="278.0" cy="62.1" r="3.5" class="dot s2"/>
+<text x="278.0" y="54.1" class="bv" text-anchor="middle">35.7</text>
+<circle cx="392.0" cy="63.6" r="3.5" class="dot s2"/>
+<text x="392.0" y="55.6" class="bv" text-anchor="middle">35.2</text>
+<circle cx="506.0" cy="69.0" r="3.5" class="dot s2"/>
+<text x="506.0" y="61.0" class="bv" text-anchor="middle">33.4</text>
+<circle cx="620.0" cy="74.2" r="3.5" class="dot s2"/>
+<text x="620.0" y="66.2" class="bv" text-anchor="middle">31.7</text>
+<text transform="translate(50.0,184) rotate(28)" class="tick">baseline</text>
+<text transform="translate(164.0,184) rotate(28)" class="tick">dp4a 0x6400 trick</text>
+<text transform="translate(278.0,184) rotate(28)" class="tick">split-K 1024</text>
+<text transform="translate(392.0,184) rotate(28)" class="tick">prev-words in regs</text>
+<text transform="translate(506.0,184) rotate(28)" class="tick">MB16 target 1408</text>
+<text transform="translate(620.0,184) rotate(28)" class="tick">K=6 planar lm_head</text>
+<text x="8" y="14" class="tick">ms for all 257 linears</text>
+</svg><p class="cap">Graph-captured time of every EXL3 linear in one forward pass (bench/linear_budget.py). M=4 is the MTP k=3 verify batch, i.e. what single-stream decode actually runs. The dp4a step briefly hurt M=4 until DPAS took over M&ge;3.</p>
+<h3>High concurrency: DPAS</h3>
+<p>From M=3 rows up, a decoded 16&times;16 tile is written straight into the VNNI layout of an XMX <code>dpas</code> B operand,
+so one decode feeds MB/8 matrix instructions. MTP k=3 turns 16 streams into a 64-row verify, which exposed that the original
+MB=64 kernel (one tile per thread) was slower than two MB=32 passes. Rebuilding it with two tiles per thread in 256-register
+mode, re-tuning split-K, and adding MB=24/40/48 blocks so odd batch sizes stop padding up, took M=64 from 124 to 68 ms.</p>
+<svg viewBox="0 0 640 160" role="img" class="chart">
+<text x="242" y="20.4" class="lbl" text-anchor="end">MB=64, 1 tile/thread (original)</text>
+<rect x="250" y="5" width="320.0" height="22" class="b3"/>
+<text x="576.0" y="20.4" class="val">124.0 ms</text>
+<text x="242" y="50.4" class="lbl" text-anchor="end">2 x MB=32 blocks</text>
+<rect x="250" y="35" width="258.1" height="22" class="b3"/>
+<text x="514.1" y="50.4" class="val">100.0 ms</text>
+<text x="242" y="80.4" class="lbl" text-anchor="end">MB=64 NT=2, 256-GRF</text>
+<rect x="250" y="65" width="225.3" height="22" class="b2"/>
+<text x="481.3" y="80.4" class="val">87.3 ms</text>
+<text x="242" y="110.4" class="lbl" text-anchor="end">+ split-K target 2048</text>
+<rect x="250" y="95" width="198.7" height="22" class="b2"/>
+<text x="454.7" y="110.4" class="val">77.0 ms</text>
+<text x="242" y="140.4" class="lbl" text-anchor="end">+ prev-words from registers</text>
+<rect x="250" y="125" width="174.7" height="22" class="b1"/>
+<text x="430.7" y="140.4" class="val">67.7 ms</text>
+</svg><p class="cap">The C16 problem: with MTP k=3 a 16-stream verify is M=64 rows. C16 was slower than C8 until the M=64 DPAS path was rebuilt (all linears, graph-captured).</p>
+<h3>Where a step goes</h3>
+<svg viewBox="0 0 640 104" role="img" class="chart">
+<rect x="10.0" y="10" width="482.9" height="34" class="b1"/>
+<text x="251.4" y="32.4" class="inbar" text-anchor="middle">31.7 ms</text>
+<rect x="492.9" y="10" width="54.8" height="34" class="b2"/>
+<text x="520.3" y="32.4" class="inbar" text-anchor="middle">3.6 ms</text>
+<rect x="547.7" y="10" width="27.4" height="34" class="b4"/>
+<rect x="575.2" y="10" width="22.9" height="34" class="b5"/>
+<rect x="598.0" y="10" width="19.8" height="34" class="b6"/>
+<rect x="617.8" y="10" width="12.2" height="34" class="b3"/>
+<rect x="10" y="58" width="12" height="12" class="b1"/>
+<text x="27" y="68" class="lbl">target EXL3 linears (M=4) (31.7)</text>
+<rect x="258" y="58" width="12" height="12" class="b2"/>
+<text x="275" y="68" class="lbl">attention + GDN in graph (3.6)</text>
+<rect x="10" y="78" width="12" height="12" class="b4"/>
+<text x="27" y="88" class="lbl">target lm_head (1.8)</text>
+<rect x="181" y="78" width="12" height="12" class="b5"/>
+<text x="198" y="88" class="lbl">draft lm_head x3 (1.5)</text>
+<rect x="366" y="78" width="12" height="12" class="b6"/>
+<text x="383" y="88" class="lbl">draft layer (1.3)</text>
+<rect x="10" y="98" width="12" height="12" class="b3"/>
+<text x="27" y="108" class="lbl">FA2 / argmax / misc (0.8)</text>
+</svg><p class="cap">Where a single-stream thinking-on decode step goes (~41 ms per step, ~2.7-3.4 tokens accepted per step). The EXL3 linears are ~77% of the step, so the kernels are the whole game at low concurrency.</p>
+
+<h2 id="serving">Serving work</h2>
+<ul>
+<li><b>Prefill.</b> Long prompts dequantize each layer once (ESIMD reconstruct, row-major Hadamards: 7.7 &rarr; 4.3 s per 8K chunk
+of linears) and use oneDNN GEMMs. At long context the bottleneck moved to attention on the fp8 KV cache.</li>
+<li><b>fp8 KV at fp16 speed.</b> 256K only fits one card with fp8 KV, but vLLM's XPU flash-attention runs ~39 TFLOPS on fp8 against
+69-74 on fp16. For single-sequence prefill chunks the patch gathers cached K/V in 32K-key blocks, dequantizes to fp16, runs the fp16
+kernel per block and merges with log-sum-exp.</li>
+<li><b>KV capacity.</b> vLLM XPU rounded the hybrid-negotiated 1600-token block (sized to one GDN state page) up to 2048 and padded
+pages to 4 MiB. Keeping 1600 grew the pool to 272,570 tokens and let 13-14 of 16 long thinking streams stay resident: +17% at C16.</li>
+<li><b>Interleaving.</b> Chunk size trades prefill speed against how long running streams freeze behind a long prompt: 8192-token
+chunks froze decode for 7.1 s, 4096 for 3.7 s, while keeping 128K prefill at 1,020 tok/s.</li>
+<li><b>Vision.</b> 32 images and 4 videos per request; the processor now caps images at 4.2 MP after a 16.7 MP image crashed the
+vision encoder with an out-of-resources error.</li>
+</ul>
+<svg viewBox="0 0 640 284" role="img" class="chart">
+<line x1="50" y1="220.0" x2="630" y2="220.0" class="grid"/>
+<text x="44" y="224.0" class="tick" text-anchor="end">0</text>
+<line x1="50" y1="170.0" x2="630" y2="170.0" class="grid"/>
+<text x="44" y="174.0" class="tick" text-anchor="end">466</text>
+<line x1="50" y1="120.0" x2="630" y2="120.0" class="grid"/>
+<text x="44" y="124.0" class="tick" text-anchor="end">932</text>
+<line x1="50" y1="70.0" x2="630" y2="70.0" class="grid"/>
+<text x="44" y="74.0" class="tick" text-anchor="end">1,399</text>
+<line x1="50" y1="20.0" x2="630" y2="20.0" class="grid"/>
+<text x="44" y="24.0" class="tick" text-anchor="end">1,865</text>
+<rect x="66.0" y="41.4" width="35.7" height="178.6" class="b3"/>
+<text x="83.8" y="37.4" class="bv" text-anchor="middle">1,665</text>
+<rect x="103.7" y="47.1" width="35.7" height="172.9" class="b2"/>
+<text x="121.5" y="43.1" class="bv" text-anchor="middle">1,612</text>
+<rect x="141.4" y="42.6" width="35.7" height="177.4" class="b1"/>
+<text x="159.2" y="38.6" class="bv" text-anchor="middle">1,654</text>
+<text x="122.5" y="238" class="lbl" text-anchor="middle">4K</text>
+<rect x="210.9" y="73.8" width="35.7" height="146.2" class="b3"/>
+<text x="228.8" y="69.8" class="bv" text-anchor="middle">1,363</text>
+<rect x="248.6" y="55.8" width="35.7" height="164.2" class="b2"/>
+<text x="266.5" y="51.8" class="bv" text-anchor="middle">1,531</text>
+<rect x="286.4" y="60.9" width="35.7" height="159.1" class="b1"/>
+<text x="304.2" y="56.9" class="bv" text-anchor="middle">1,483</text>
+<text x="267.5" y="238" class="lbl" text-anchor="middle">32K</text>
+<rect x="355.9" y="138.5" width="35.7" height="81.5" class="b3"/>
+<text x="373.8" y="134.5" class="bv" text-anchor="middle">760</text>
+<rect x="393.6" y="106.4" width="35.7" height="113.6" class="b2"/>
+<text x="411.5" y="102.4" class="bv" text-anchor="middle">1,059</text>
+<rect x="431.4" y="110.6" width="35.7" height="109.4" class="b1"/>
+<text x="449.2" y="106.6" class="bv" text-anchor="middle">1,020</text>
+<text x="412.5" y="238" class="lbl" text-anchor="middle">128K</text>
+<rect x="500.9" y="165.5" width="35.7" height="54.5" class="b3"/>
+<text x="518.8" y="161.5" class="bv" text-anchor="middle">508</text>
+<rect x="538.6" y="138.2" width="35.7" height="81.8" class="b2"/>
+<text x="556.5" y="134.2" class="bv" text-anchor="middle">763</text>
+<rect x="576.4" y="142.1" width="35.7" height="77.9" class="b1"/>
+<text x="594.2" y="138.1" class="bv" text-anchor="middle">726</text>
+<text x="557.5" y="238" class="lbl" text-anchor="middle">254K</text>
+<rect x="50" y="268" width="12" height="12" class="b3"/>
+<text x="67" y="278" class="lbl">fp8 KV, stock FA2</text>
+<rect x="227" y="268" width="12" height="12" class="b2"/>
+<text x="244" y="278" class="lbl">+ block-dequant fp8 prefill</text>
+<rect x="484" y="268" width="12" height="12" class="b1"/>
+<text x="501" y="278" class="lbl">+ 4096-token chunks (recipe)</text>
+<text x="8" y="14" class="tick">prefill tok/s (cold, one request)</text>
+</svg><p class="cap">Long-context prefill was attention-bound: XPU FA2 runs 69-74 TFLOPS on fp16 K/V but 39 on fp8. Dequantizing the cached K/V in 32K-key blocks and merging with log-sum-exp recovered fp16 speed. Chunk 4096 trades a little prefill for a 7.1 s &rarr; 3.7 s shorter decode freeze behind long prompts.</p>
+
+<h2 id="drafts">Speculative decoding</h2>
+<p>The EXL3 repository already ships Qwen's MTP head in 4-bit, so MTP needed no grafting. The draft head's lm_head is the expensive
+part (it runs once per draft token), so it was pruned to the 512 of 1940 128-token vocabulary blocks that cover 98.6% of a text
+corpus; the target still verifies with the full lm_head, so output is unchanged and acceptance did not move. k=3 is the best
+all-round draft length. DSpark (RadixArk) and DFlash drafters were evaluated: DSpark accepts more tokens per step but loses on
+wall time; a B70-tuned DSpark fine-tune (<code>rwmacy/qwen3.8-27b-dflash-drafter-fp8-b70</code>) and z-lab's single-pass
+DFlash2 (~3 ms draft cost, would need a vLLM port) remain untested.</p>
+<svg viewBox="0 0 640 100" role="img" class="chart">
+<text x="242" y="20.4" class="lbl" text-anchor="end">MTP k=3, pruned draft head (default)</text>
+<rect x="250" y="5" width="279.2" height="22" class="b1"/>
+<text x="535.2" y="20.4" class="val">82.9 tok/s</text>
+<text x="242" y="50.4" class="lbl" text-anchor="end">DSpark k=7 (RadixArk)</text>
+<rect x="250" y="35" width="247.9" height="22" class="b3"/>
+<text x="503.9" y="50.4" class="val">73.6 tok/s</text>
+<text x="242" y="80.4" class="lbl" text-anchor="end">MTP k=3, prose C1, earlier full-vocab head</text>
+<rect x="250" y="65" width="127.7" height="22" class="b4"/>
+<text x="383.7" y="80.4" class="val">37.9 tok/s</text>
+</svg><p class="cap">Speculative drafts at single stream. Top two: realistic prose, temperature 1.0, same prompts (2026-09-24). DSpark accepts more tokens per step (3.26 vs 2.85) but its draft pass costs more than it saves, and its own KV cache caps context at 131K. The bottom bar is the first MTP result before the draft lm_head was pruned to 512 of 1940 vocab blocks (thinking-off panel), shown for scale.</p>
+
+<h2 id="correct">Correctness</h2>
+<table><thead><tr><th>Gate</th><th>Result</th></tr></thead><tbody>
+<tr><td>A1 &mdash; weights bit-exact vs exllamav3 reconstruct, all 401 tensors, every kernel path (vector M=1/2/4, DPAS M=3..64)</td><td><span class='ok'>pass</span></td></tr>
+<tr><td>A3 &mdash; end-to-end logits vs exllamav3 on an RTX 3090 (16,320 positions)</td><td><span class='ok'>top-1 99.63%, KL 9.8e-5 nats</span></td></tr>
+<tr><td>T1 &mdash; C1 decode &ge; 50 tok/s thinking on</td><td><span class='ok'>91.2 prose / 66.1 code (realistic)</span></td></tr>
+<tr><td>T2 &mdash; cold prefill &ge; 1000 tok/s at 4K/32K/128K</td><td><span class='ok'>1654 / 1483 / 1020</span> (prefix caching off); 923 at 128K with caching on</td></tr>
+<tr><td>T3 &mdash; 262,144 context on one card</td><td><span class='ok'>pass</span>, 272,570 KV tokens, needle 3/3 at 128K</td></tr>
+<tr><td>T5 &mdash; vision</td><td><span class='ok'>32 numbered images read back in order; video pass</span></td></tr>
+<tr><td>T6 &mdash; MTP greedy identity</td><td>5/8 exact; divergences are fp near-ties (0.016 nat)</td></tr>
+<tr><td>B &mdash; beat llama.cpp on the same card</td><td><span class='ok'>every cell</span> (C1 3.6x, C16 6.5x)</td></tr>
+</tbody></table>
+<p>The bit-exactness gate earned its keep: a "halves" decode variant timed 4% faster but produced errors up to 120 in the output.
+It passed the original gate, which only exercised two of the production code paths; the gate was extended to every path (vector
+M=1/2/4, DPAS M=3/8/16/24/32/40/48/64) and caught it.</p>
+
+<h2 id="live">Against the live service</h2>
+<p>On 24 September the canonical build and the service then running on the other card (an older image) were driven with the same
+client and prompts, one after the other.</p>
+<svg viewBox="0 0 640 284" role="img" class="chart">
+<line x1="50" y1="220.0" x2="630" y2="220.0" class="grid"/>
+<text x="44" y="224.0" class="tick" text-anchor="end">0</text>
+<line x1="50" y1="170.0" x2="630" y2="170.0" class="grid"/>
+<text x="44" y="174.0" class="tick" text-anchor="end">101</text>
+<line x1="50" y1="120.0" x2="630" y2="120.0" class="grid"/>
+<text x="44" y="124.0" class="tick" text-anchor="end">202</text>
+<line x1="50" y1="70.0" x2="630" y2="70.0" class="grid"/>
+<text x="44" y="74.0" class="tick" text-anchor="end">303</text>
+<line x1="50" y1="20.0" x2="630" y2="20.0" class="grid"/>
+<text x="44" y="24.0" class="tick" text-anchor="end">404</text>
+<rect x="59.1" y="185.8" width="30.3" height="34.2" class="b3"/>
+<text x="74.3" y="181.8" class="bv" text-anchor="middle">69</text>
+<rect x="91.4" y="175.5" width="30.3" height="44.5" class="b1"/>
+<text x="106.6" y="171.5" class="bv" text-anchor="middle">90</text>
+<text x="91.4" y="238" class="lbl" text-anchor="middle">prose C1</text>
+<rect x="142.0" y="147.2" width="30.3" height="72.8" class="b3"/>
+<text x="157.1" y="143.2" class="bv" text-anchor="middle">147</text>
+<rect x="174.3" y="150.1" width="30.3" height="69.9" class="b1"/>
+<text x="189.4" y="146.1" class="bv" text-anchor="middle">141</text>
+<text x="174.3" y="238" class="lbl" text-anchor="middle">prose C2</text>
+<rect x="224.8" y="89.3" width="30.3" height="130.7" class="b3"/>
+<text x="240.0" y="85.3" class="bv" text-anchor="middle">264</text>
+<rect x="257.1" y="90.3" width="30.3" height="129.7" class="b1"/>
+<text x="272.3" y="86.3" class="bv" text-anchor="middle">262</text>
+<text x="257.1" y="238" class="lbl" text-anchor="middle">prose C4</text>
+<rect x="307.7" y="52.8" width="30.3" height="167.2" class="b3"/>
+<text x="322.8" y="48.8" class="bv" text-anchor="middle">338</text>
+<rect x="340.0" y="47.6" width="30.3" height="172.4" class="b1"/>
+<text x="355.2" y="43.6" class="bv" text-anchor="middle">349</text>
+<text x="340.0" y="238" class="lbl" text-anchor="middle">prose C8</text>
+<rect x="390.5" y="144.9" width="30.3" height="75.1" class="b3"/>
+<text x="405.7" y="140.9" class="bv" text-anchor="middle">152</text>
+<rect x="422.9" y="41.4" width="30.3" height="178.6" class="b1"/>
+<text x="438.0" y="37.4" class="bv" text-anchor="middle">361</text>
+<text x="422.9" y="238" class="lbl" text-anchor="middle">prose C16</text>
+<rect x="473.4" y="187.3" width="30.3" height="32.7" class="b3"/>
+<text x="488.6" y="183.3" class="bv" text-anchor="middle">66</text>
+<rect x="505.7" y="186.9" width="30.3" height="33.1" class="b1"/>
+<text x="520.9" y="182.9" class="bv" text-anchor="middle">67</text>
+<text x="505.7" y="238" class="lbl" text-anchor="middle">code C1</text>
+<rect x="556.3" y="160.5" width="30.3" height="59.5" class="b3"/>
+<text x="571.4" y="156.5" class="bv" text-anchor="middle">120</text>
+<rect x="588.6" y="160.4" width="30.3" height="59.6" class="b1"/>
+<text x="603.7" y="156.4" class="bv" text-anchor="middle">120</text>
+<text x="588.6" y="238" class="lbl" text-anchor="middle">code C2</text>
+<rect x="50" y="268" width="12" height="12" class="b3"/>
+<text x="67" y="278" class="lbl">live service (image 753922b1)</text>
+<rect x="323" y="268" width="12" height="12" class="b1"/>
+<text x="340" y="278" class="lbl">current canonical build</text>
+<text x="8" y="14" class="tick">aggregate tok/s</text>
+</svg><p class="cap">Same client, same prompts, run back to back on 2026-09-24 (temperature 0.7, thinking on). The live service queues at C16 (82 s to first token) because it predates the exact-KV-block fix. Code C4-C16 for the new build are missing: B70 #1 dropped off the PCIe bus during that cell (see Hardware).</p>
+<table><thead><tr><th>Workload</th><th>Live service</th><th>Canonical build</th><th></th></tr></thead><tbody>
+<tr><td>prose C1 / C8 / C16 (tok/s)</td><td>69.1 / 338.0 / 151.8</td><td>89.9 / 348.6 / 361.0</td><td><span class='ok'>win</span></td></tr>
+<tr><td>C16 time to first token</td><td>82.2 s</td><td>6.4 s</td><td><span class='ok'>win</span></td></tr>
+<tr><td>worst decode freeze under mixed load</td><td>7.1 s</td><td>3.0 s</td><td><span class='ok'>win</span></td></tr>
+<tr><td>cold prefill 4K / 32K / 128K (tok/s)</td><td>1721 / 1522 / 1053</td><td>1636 / 1423 / 923</td><td><span class='bad'>loss</span> (prefix-caching chunk rounding)</td></tr>
+<tr><td>1K prompt TTFT behind a 32K prefill</td><td>5.4 s</td><td>7.5 s</td><td><span class='bad'>loss</span> (same cause)</td></tr>
+</tbody></table>
+<p class="box">The two losses share one cause: with prefix caching on, vLLM's hybrid cache ("align" mode) rounds every prefill chunk
+down to a multiple of the 1600-token block, so a 4096-token budget prefills 3,200 tokens per step. The fix &mdash; a 6,400-token budget
+with long prompts capped at 4,800 per step, leaving room for short prompts &mdash; was ready but not measured before the card dropped.
+The live service also had prefix caching off, as did every earlier recipe: vLLM 0.26 does not enable it for hybrid models.</p>
+
+<h2 id="alu">Why it is ALU-bound</h2>
+<p>Single-stream decode reads the weights at ~400 GB/s of the card's 608. The limit is arithmetic: decoding costs 6-9 vector
+instructions per weight (extract the 16-bit window, multiply, byte-sum, scale), and at the card's integer throughput that is about
+the whole budget. An ISA read of the DPAS loop shows ~9 SIMD32 instructions per 32-value group, near the integer roofline.
+Plain INT4 needs 2-3 instructions per weight and saturates more of the bus, but reads ~40% more bytes, so per forward pass the two
+are close &mdash; while EXL3 at 4.0 bpw is far closer to the bf16 model.</p>
+<p>Two ways to cut the decode itself were identified: a 65,536-entry fp16 lookup table replacing multiply + byte-sum + scale (still
+bit-exact, since the table is filled by the same function; built as <code>EXL3_LUT</code>, not yet measured), and re-laying the bitstream
+at load so fewer windows straddle two words.</p>
+
+<h2 id="rejected">What did not work</h2>
+<table><thead><tr><th>Tried</th><th>Result</th><th>Why rejected</th></tr></thead><tbody>
+<tr><td>Software-pipelined trellis loads</td><td>M=4 45 &rarr; 70 ms</td><td>register spills</td></tr>
+<tr><td>Fused single-kernel linear (had_in + split-K + had_out)</td><td>M=4 35.1 &rarr; 45.2 ms</td><td>serialized split-K tail</td></tr>
+<tr><td>mul1 as two 16x16 multiplies (EXL3_MUL16)</td><td>M=1 29.4 &rarr; 34.4 ms</td><td>slower everywhere</td></tr>
+<tr><td>K=4 'halves' decode (EXL3_K4_HALVES)</td><td>&minus;4% time</td><td><span class='bad'>wrong outputs</span> (caught by the extended Gate A1)</td></tr>
+<tr><td>DPAS double-buffered word prefetch</td><td>M=16 39 &rarr; 86 ms</td><td>spills</td></tr>
+<tr><td>LSC L1/L2 prefetch of trellis words</td><td>&plusmn;noise</td><td>no gain</td></tr>
+<tr><td>Separate B registers per tile (EXL3_BV_ALL)</td><td>no change</td><td>no gain</td></tr>
+<tr><td>DPAS MB=4 blocks</td><td>within noise</td><td>M=4 is decode-bound, not DPAS-bound</td></tr>
+<tr><td>Codebook-affine fold (EXL3_FOLD)</td><td>&minus;3.5% at M&le;8</td><td>not bit-exact by design + unexplained gate anomaly</td></tr>
+<tr><td>Custom ESIMD flash-attention (head_dim 256)</td><td>48 TF vs FA2 61-75 TF</td><td>8-row fp32 O fills half the GRF</td></tr>
+<tr><td>Piecewise / FULL_AND_PIECEWISE graphs; dynamic draft length</td><td>UR OUT_OF_RESOURCES at capture</td><td>Level Zero graph limits</td></tr>
+<tr><td>DSpark k=7 draft (thinking on)</td><td>C1 prose 73.6 vs MTP 82.9</td><td>draft pass too expensive; 131K context</td></tr>
+<tr><td>MTP k=4 / k=2 as default</td><td>k=4 +8% C1 but &minus;9..15% C4; k=2 +11% C16 but loses C1-C8</td><td>k=3 is the best all-round</td></tr>
+<tr><td>gpu_memory_utilization 0.970 / 0.985</td><td>flat / refused at launch</td><td>no gain</td></tr>
+<tr><td>Align-mode sync skip (patch_align_sync)</td><td>correct, 337.7 vs 337.8 tok/s</td><td>no gain; opt-in</td></tr>
+</tbody></table>
+
+<h2 id="hw">Hardware finding</h2>
+<p>Twice on 24 September the B70 under test fell off the PCIe bus mid-benchmark (<code>pciehp: Slot(19): Link Down / Card not
+present</code>, then re-enumeration with a new render node). The journal shows five such link drops across both B70 slots in a week
+and ~1,600 correctable data-link timeouts a day. Several earlier "device lost" crashes attributed to software were probably this.
+It is a signal-integrity / link-power problem (riser, PCIe generation or ASPM), not the kernels; the card works normally after
+re-enumeration.</p>
+
+<h2 id="recipe">Canonical recipe</h2>
+<p>The registry has one recommended, validated Qwen3.8-27B recipe for the B70:
+<code>qwen38-27b-exl3-4bpw-arcb70-vllm-exl3xpu-tp1</code>. It now enables prefix caching.</p>
+<pre>IMG=ghcr.io/0xsero/exl3xpu@sha256:86276b00c9f0161e7e7ccba1e683ca622679466a5c855e952b375ddbb6ec57c4
+docker run --rm --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path:ro --shm-size 32g -p 8000:8000 \
+  -e HF_HUB_OFFLINE=1 -v $MODELS/turboderp-Qwen3.8-27B-exl3-4.00bpw:/models:ro $IMG \
+  models/qwen3.8-27b-exl3-4.00bpw --gpu 0 --port 8000 --model-path /models \
+  -- --enable-prefix-caching --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3</pre>
+<table><thead><tr><th>Setting</th><th>Value</th></tr></thead><tbody>
+<tr><td>Weights</td><td>turboderp/Qwen3.8-27B-exl3 @ <code>113cf7ab</code>, 4.00 bpw (6-bit lm_head), 14.9 GiB</td></tr>
+<tr><td>Engine</td><td>vLLM 0.26.1 XPU + exl3xpu (attested image above)</td></tr>
+<tr><td>Speculative</td><td>MTP k=3, draft lm_head pruned to 512 vocab blocks</td></tr>
+<tr><td>KV cache</td><td>fp8 e4m3, 272,570 tokens in 1600-token blocks, prefix caching on</td></tr>
+<tr><td>Context / sequences</td><td>262,144 / 16</td></tr>
+<tr><td>Prefill chunk</td><td>4096 tokens</td></tr>
+<tr><td>Multimodal</td><td>32 images (&le; 4.2 MP) / 4 videos per request</td></tr>
+</tbody></table>
+
+<h2 id="open">Open items</h2>
+<ul>
+<li>Fix the B70 PCIe links (owner's hardware/BIOS decision), then re-accept the recipe with prefix caching on.</li>
+<li>Scheduler fix for the prefix-caching prefill regression (6,400 budget, 4,800 long-prompt cap).</li>
+<li>Measure the codebook lookup-table kernel (<code>EXL3_LUT</code>) against the current decode.</li>
+<li>DFlash2 single-pass drafter port; the B70-tuned DSpark fine-tune.</li>
+<li>6-bit / 4-bit EXL-style KV cache: ~2&times; cached tokens and room for a drafter at 256K.</li>
+<li>256K prefill (726 tok/s) is bound by fp8 attention at head_dim 256.</li>
+</ul>
+<p class="cap">Every number above comes from <code>docs/PROGRESS.md</code> and <code>bench/results/</code> in the repository, where
+each kept and rejected step is logged with its measurement.</p>
+</main>
+</body></html>

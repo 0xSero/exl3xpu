@@ -1,3 +1,4 @@
+#include <map>
 // Host launchers + torch bindings for EXL3 ESIMD kernels.
 #include <torch/all.h>
 #include <torch/library.h>
@@ -56,6 +57,27 @@ static void launch_had_out(const at::Tensor& part, int P, const at::Tensor& svh,
     q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
 }
 
+#ifdef EXL3_LUT
+// one table per (device, codebook), built on first use from decode_cb_h itself (bit-exact by construction)
+static const fp16* lut_for(int cb, const at::Tensor& like, sycl::queue& q) {
+    static std::map<std::pair<int, int>, at::Tensor> tabs;
+    auto key = std::make_pair((int)like.device().index(), cb);
+    auto it = tabs.find(key);
+    if (it == tabs.end()) {
+        auto t = at::empty({65536}, like.options().dtype(at::kHalf));
+        fp16* p = reinterpret_cast<fp16*>(t.data_ptr());
+        q.submit([&](sycl::handler& h) {
+            if (cb == 1) h.parallel_for(sycl::nd_range<1>(4096, 16), LutKernel<1>{p});
+            else if (cb == 2) h.parallel_for(sycl::nd_range<1>(4096, 16), LutKernel<2>{p});
+            else h.parallel_for(sycl::nd_range<1>(4096, 16), LutKernel<0>{p});
+        });
+        q.wait();
+        it = tabs.emplace(key, t).first;
+    }
+    return reinterpret_cast<const fp16*>(it->second.data_ptr());
+}
+#endif
+
 template <int K, int CB, int MR, int NT>
 static void launch_gemv(const at::Tensor& xh, const at::Tensor& tr, const at::Tensor& shard, at::Tensor& part,
                         int M, int Kdim, int N, int P, int rows_per_split, sycl::queue& q) {
@@ -65,6 +87,9 @@ static void launch_gemv(const at::Tensor& xh, const at::Tensor& tr, const at::Te
                                 reinterpret_cast<const uint32_t*>(tr.data_ptr()),
                                 shard.data_ptr<int>(), part.data_ptr<float>(),
                                 M, Kdim, N, tiles_n, rows_per_split, n_strips};
+#ifdef EXL3_LUT
+    k.lut = lut_for(CB, xh, q);
+#endif
     int n = n_strips * P;
     int local = g_local;
     q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
@@ -206,9 +231,15 @@ static bool fused_small(const at::Tensor& x, const at::Tensor& tr, const at::Ten
     if (vec) {
         if (M <= 1) {
             GemvKernel<K, CB, 1, nt_of(K, 1), true> k{nullptr, trp, shp, pp, M, Kdim, N, tiles_n, rps, n_strips, fa, P};
+#ifdef EXL3_LUT
+            k.lut = lut_for(CB, x, q);
+#endif
             launch_fused(k, n, q);
         } else {
             GemvKernel<K, CB, 2, nt_of(K, 2), true> k{nullptr, trp, shp, pp, M, Kdim, N, tiles_n, rps, n_strips, fa, P};
+#ifdef EXL3_LUT
+            k.lut = lut_for(CB, x, q);
+#endif
             launch_fused(k, n, q);
         }
     } else {

@@ -95,6 +95,25 @@ ESIMD_INLINE simd<float, N> decode_cb(simd<uint32_t, N> st) {
     return convert<float>(decode_cb_h<CB, N>(st));
 }
 
+#ifdef EXL3_LUT
+// Codebook lookup: lut[state] holds the fp16 value decode_cb_h<CB> computes for that state (built by
+// LutKernel from the same function, so bit-exact). Replaces mul + dp4a + mad per weight with one L1-cached gather.
+template <int N>
+ESIMD_INLINE simd<fp16, N> decode_lut(const fp16* lut, simd<uint32_t, N> st) {
+    return gather<fp16, N>(lut, st << 1);
+}
+
+template <int CB>
+struct LutKernel {
+    fp16* lut;
+    void operator()(sycl::nd_item<1> it) const SYCL_ESIMD_KERNEL {
+        uint32_t base = it.get_global_id(0) * 16;
+        simd<uint32_t, 16> st(base, 1);
+        block_store<fp16, 16>(lut + base, decode_cb_h<CB, 16>(st));
+    }
+};
+#endif
+
 // state for value u of every period of TP adjacent tiles: words dw [TP*WORDS], prev[x] = dw[x - 1]
 // (circular per tile). Tiles are contiguous and WORDS is a multiple of D, so a stride-D select runs
 // straight across tile boundaries: TP=2 turns K=6's 16-lane vectors into 32-lane ones.
@@ -332,6 +351,7 @@ struct GemvKernel {
     int M, Kdim, N, tiles_n, rows_per_split, n_strips;
     FusedArgs fa;
     int Psplit;     // number of K splits (fused split-K reduction target)
+    const fp16* lut = nullptr;   // EXL3_LUT: 65536-entry codebook table
 
     static constexpr int G = Geo<K>::G;
     static constexpr int V = Geo<K>::V;
@@ -351,7 +371,7 @@ struct GemvKernel {
 
     template <int u>
     static ESIMD_INLINE void step(simd<uint32_t, NT * W>& words, simd<uint32_t, NT * W>& prev,
-                                  simd<fp16, MR * 16>& xr, simd<fp16, ACC>& hacc) {
+                                  simd<fp16, MR * 16>& xr, simd<fp16, ACC>& hacc, const fp16* lut) {
         if constexpr (u < V) {
             constexpr int h = (u >> 2) & 1;
             // row(grp, u) = R0 + STR * (grp % P): a strided replicate of the 16-row x block
@@ -362,14 +382,18 @@ struct GemvKernel {
             for (int jp = 0; jp < NP; ++jp) {
                 simd<uint32_t, W * TP> dw = words.template select<W * TP, 1>(jp * W * TP);
                 simd<uint32_t, W * TP> pw = prev.template select<W * TP, 1>(jp * W * TP);
+#ifdef EXL3_LUT
+                simd<fp16, GV> v = decode_lut<GV>(lut, tile_states<K, u, TP, PLANAR>(dw, pw));
+#else
                 simd<fp16, GV> v = decode_cb_h<CB, GV>(tile_states<K, u, TP, PLANAR>(dw, pw));
+#endif
 #pragma unroll
                 for (int m = 0; m < MR; ++m) {
                     auto a = hacc.template select<GV, 1>(((m * NP + jp) * 2 + h) * GV);
                     a += v * xr.template replicate_vs_w_hs<GV / P, 0, P, STR>(m * 16 + R0);
                 }
             }
-            step<u + 1>(words, prev, xr, hacc);
+            step<u + 1>(words, prev, xr, hacc, lut);
         }
     }
 
@@ -402,7 +426,7 @@ struct GemvKernel {
                     for (int m = 0; m < MR; ++m)
                         xr.template select<16, 1>(m * 16) = xblk.template select<16, 1>(m * 128 + i * 16);
                     simd<fp16, ACC> hacc = 0;
-                    step<0>(words, prev, xr, hacc);
+                    step<0>(words, prev, xr, hacc, lut);
                     acc += convert<float>(hacc);
                 }
             }
@@ -428,7 +452,7 @@ struct GemvKernel {
             }
             // fp16 partial dot products over one tile-row (few terms per lane), folded into fp32
             simd<fp16, ACC> hacc = 0;
-            step<0>(words, prev, xr, hacc);
+            step<0>(words, prev, xr, hacc, lut);
             acc += convert<float>(hacc);
         }
         }
