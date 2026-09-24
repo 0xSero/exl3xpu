@@ -351,3 +351,6 @@ MTP k=2 at C16 thinking on (exact KV blocks): all 16 streams resident (84-93% KV
 cannot switch k on this driver, so default stays k=3; k=2 is the many-users variant.
 gpu_memory_utilization 0.985: launch refused (30.97 of 31.89 GiB free at startup). 0.970: KV pool 272,570 -> 288,954
 tokens but still 13-14 of 16 streams resident; C16 thinking prose 409.5, code 335.4 (flat). Rejected; 0.965 stays.
+mamba_cache_mode default + prefix caching off (with exact blocks, k=3): pool 284,485 tokens, still 14 of 16 streams
+resident; C16 thinking prose 405.6, code 345.5 (flat). Rejected. The per-stream GDN state copies for k=3 speculation
+are the limit; only k=2 (fewer copies) fits all 16. Remaining capacity lever: smaller GDN state (own kernels).
