@@ -427,3 +427,9 @@ default for hybrid GDN models, and model.yaml never set it. Now explicit `enable
 replacing mul + dp4a + mad with one gather per weight. All linears, graph-captured, B70 #1, 3 alternating reps:
 M=1 27.24 -> 107.65 ms (481 -> 122 GB/s), M=2 31.6 -> 106.5 ms. The per-lane gather rate is ~4x below the ALU
 decode rate; an SLM table would need a 128 KB refill per work-group (more bytes than the weights). Left opt-in.
+
+### Scheduler A/B (6400 budget / 4800 long-prompt cap) — not measured: B70 #1 dropped again (2026-09-24 20:32)
+Baseline (prefix caching on, chunk 4096) got through 4K 1545 and 32K 1421 tok/s, then B70 #1 fell off the bus
+during the 128K prefill (pciehp Slot(19) Link Down, re-enumerated as renderD133) about 5 min into load.
+B70 #1 link drops today: 15:08, 16:19, 20:32 (earlier ones needed ~20-25 min of decode; this one ~5 min of prefill).
+GPU work on B70 #1 halted until the link is fixed.
