@@ -36,6 +36,7 @@ vllm:
 env:
   VLLM_XPU_ENABLE_XPU_GRAPH: "1"
   EXL3_DRAFT_VOCAB: "{model_dir}/draft_vocab.json"   # pruned MTP draft head (scripts/draft_vocab.py)
+  EXL3_KV_BLOCK_EXACT: "1"   # keep 1600-token KV blocks (not 2048): C16 thinking 10 -> 14 streams, +17% agg
   VLLM_WORKER_MULTIPROC_METHOD: spawn
 
 # Data parallel: one replica per GPU behind scripts/lb.py (the model fits one 32 GB B70).

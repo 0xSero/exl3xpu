@@ -321,3 +321,14 @@ max gap 7.1 s -- overloaded. Arrivals every 30 s, by max_num_batched_tokens (pre
 | 512 | 140.2 | 0.70 s | 588 ms | 10.8 / 8.0 / 38.3 s |
 2048 is the balance (freeze 7.1 -> 1.95 s for -4% decode, -7% 32K TTFT). The DEVICE_LOST hung inside XPU graph
 replay (5 s xe job timeout), like the earlier C16 crash; repro + 2048 soak running.
+
+### Exact KV block size (EXL3_KV_BLOCK_EXACT=1), kept (2026-09-24)
+vLLM XPU rounded the hybrid-negotiated attention block (1600 tokens = GDN state page) up to 2048 and padded
+every page to 4 MiB. The patch keeps 1600 (a multiple of 64, as the GDN kernel needs). KV pool 267,761 ->
+272,570 tokens; C16 thinking-on 10 -> 13-14 streams running. Thinking on, agg tok/s: C16 prose 349.1 -> 409.9,
+code 294.6 -> 344.2 (+17%); C1 prose 76.9 -> 76.6, code 61.4 -> 63.3. Vision PASS, 128K needle 3/3.
+Default on in model.yaml.
+
+Interleave (4 streams, arrivals every 30 s): chunk 4096 repeat ran clean (the earlier DEVICE_LOST did not
+reproduce): 177.1 tok/s, max gap 3.7 s, TTFT 32K 24.8 s. chunk 2048 5-min soak: 175.8 tok/s, max gap 5.6 s,
+TTFT 32K 26.3 s (a multi-second stall persists independent of chunk size; cause TBD).
