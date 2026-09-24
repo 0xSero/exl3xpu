@@ -234,7 +234,7 @@ class Exl3LinearMethod(LinearMethodBase):
         layer.suh = Parameter(suh, requires_grad=False)
         layer.exl3_shard_of_nb = shard_of_nb.to(dev)
         layer.exl3_bounds = bounds
-        if isinstance(layer, ParallelLMHead) and os.environ.get("EXL3_DRAFT_VOCAB"):
+        if isinstance(layer, ParallelLMHead) and os.environ.get("EXL3_DRAFT_VOCAB") and _spec_is_mtp():
             _build_draft_head(layer, os.environ["EXL3_DRAFT_VOCAB"])
         cb = self.cb
         if hasattr(layer, "mcg"):
@@ -270,6 +270,17 @@ class Exl3LinearMethod(LinearMethodBase):
 # The drafter proposes tokens from a subset of 128-token blocks (EXL3 lm_head columns can only be
 # sliced by whole 128-column Hadamard blocks); the target still verifies with the full lm_head, so
 # generated text is unchanged. Enabled by EXL3_DRAFT_VOCAB=<draft_vocab.json> (see scripts/draft_vocab.py).
+
+def _spec_is_mtp():
+    """The pruned draft head only serves the MTP drafter; with another drafter (dspark, dflash) or none it is
+    dead weight in VRAM, so skip it."""
+    try:
+        from vllm.config import get_current_vllm_config
+        sc = get_current_vllm_config().speculative_config
+    except Exception:
+        return True
+    return sc is not None and "mtp" in str(getattr(sc, "method", "")).lower()
+
 
 def _build_draft_head(layer, path):
     with open(path) as f:

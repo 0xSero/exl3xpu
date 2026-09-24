@@ -217,6 +217,7 @@ async def stream_one(session, url, model, prompt, max_tokens, temperature, think
                     delta = ch.get("delta", {})
                     text = delta.get("content") or delta.get("reasoning_content") or delta.get("reasoning")
                     if text:
+                        rec["text"] = rec.get("text", "") + text
                         if usage and usage.get("completion_tokens") is not None:
                             n = usage["completion_tokens"] - rec.get("_seen", 0)
                             rec["_seen"] = usage["completion_tokens"]
@@ -230,6 +231,20 @@ async def stream_one(session, url, model, prompt, max_tokens, temperature, think
         rec["error"] = repr(e)[:200]
     rec["t_end"] = time.time()
     return rec
+
+
+def loop_ratio(text: str, n: int = 32) -> float:
+    """Share of 32-word shingles that already appeared earlier in the text: ~0 for normal prose/code,
+    high when generation is stuck repeating (which speculative drafts accept trivially)."""
+    w = text.split()
+    if len(w) < 4 * n:
+        return 0.0
+    seen, dup = set(), 0
+    for i in range(len(w) - n + 1):
+        sh = tuple(w[i:i + n])
+        dup += sh in seen
+        seen.add(sh)
+    return dup / (len(w) - n + 1)
 
 
 async def spec_counters(base):
@@ -306,6 +321,16 @@ async def decode_cell(args, C, ctx, cls):
         flags.append("REQ_FAIL")
     if busy and max(b or 0 for b in busy) < 60:
         flags.append("GPU_IDLE")
+    loops = [round(loop_ratio(r.get("text", "")), 3) for r in recs]
+    if any(x > 0.2 for x in loops):
+        flags.append("LOOP")
+    if getattr(args, "dump_text", None):
+        with open(args.dump_text, "a") as f:
+            for r in recs:
+                f.write(json.dumps({"label": args.label, "C": C, "cls": cls, "finish": r.get("finish"),
+                                    "completion_tokens": r.get("completion_tokens"),
+                                    "loop_ratio": round(loop_ratio(r.get("text", "")), 3),
+                                    "text": r.get("text", "")}) + "\n")
     row = dict(kind="decode", concurrency=C, context_tokens=ctx, content_class=cls, thinking=args.thinking,
                temperature=args.temperature, cache_state="cold-unique",
                decode_tok_s_total=round(agg_tokens / args.window, 2),
@@ -314,7 +339,7 @@ async def decode_cell(args, C, ctx, cls):
                ttft_ms_p50=round(1000 * statistics.median(ttfts)) if ttfts else None,
                output_tokens_mean=round(statistics.mean(outs)) if outs else None,
                samples=len(per_stream), window_seconds=args.window, gpu_busy_pct=busy, flags=flags,
-               spec_accept_len=accept_len,
+               spec_accept_len=accept_len, loop_ratio_max=max(loops) if loops else None,
                label=args.label, corpus=args.corpus)
     return row
 
@@ -373,6 +398,7 @@ async def main():
     ap.add_argument("--window", type=float, default=45)
     ap.add_argument("--grace", type=float, default=5)
     ap.add_argument("--max-tokens", type=int, default=2048)
+    ap.add_argument("--dump-text", default=None, help="append every response text + loop ratio to this jsonl")
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--thinking", action="store_true")
     ap.add_argument("--label", default="")
