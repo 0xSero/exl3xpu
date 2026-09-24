@@ -375,3 +375,7 @@ Vision (bench/vision_bench.py, limits raised to 32 images / 4 videos): 16 number
 order (4/8/16 all OK). Image prefill: 1x512px 281 tok TTFT 0.61 s; 16x1024px 16.4K tok 12.4 s (1322 tok/s);
 16x2048px 65.6K tok 69.4 s (945 tok/s); decode with images in context 57-73 tok/s.
 Real-text prefill (Gutenberg): 4K 1680, 32K 1476, 128K 1020 tok/s (same as noise, as expected).
+Vision robustness: a single 4096x4096 image (the processor's 16.7 MP max, ~65K ViT patches) crashed the engine
+(UR OUT_OF_RESOURCES in the vision rotary embedding). mm_processor_kwargs size.longest_edge 4194304 now downscales
+large images (~4.1K tokens each): 1x4096px TTFT 3.72 s, 2x4096px 7.54 s, decode 69-73 tok/s; 32 images @512px read
+back in order; video and vision tests PASS; 0 OUT_OF_RESOURCES.

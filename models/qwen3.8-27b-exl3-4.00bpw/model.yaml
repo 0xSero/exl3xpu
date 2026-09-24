@@ -29,6 +29,9 @@ vllm:
     method: qwen3_5_mtp
     num_speculative_tokens: 3
   limit_mm_per_prompt: {image: 32, video: 4}
+  # cap image area at preprocessing (the processor default allows 16.7 MP, whose ~65K ViT patches crash the
+  # vision encoder with UR OUT_OF_RESOURCES); larger images are downscaled to <= 4.2 MP (~4K tokens)
+  mm_processor_kwargs: {size: {longest_edge: 4194304, shortest_edge: 65536}}
   compilation_config:
     cudagraph_mode: FULL_DECODE_ONLY
     cudagraph_capture_sizes: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64]
