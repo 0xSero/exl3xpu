@@ -10,7 +10,9 @@ gdn_mask_index: GDNAttentionMetadataBuilder.build indexes device tensors with a 
   CPU-computed indices copied asynchronously from pinned memory + index_select (no sync).
 """
 from __future__ import annotations
+import copy
 import inspect
+import os
 import re
 import textwrap
 
@@ -112,10 +114,79 @@ def patch_fp8kv_prefill() -> bool:
             return False
         return True
 
+    def mixed_eligible(self, md, output_scale, output_block_scale) -> bool:
+        """decode requests + exactly one long prefill chunk (decodes are ordered first by vLLM)"""
+        if md is None or output_scale is not None or output_block_scale is not None:
+            return False
+        if os.environ.get("EXL3_FP8KV_MIXED", "0") != "1":
+            return False
+        if getattr(md, "num_prefill_reqs", 0) != 1 or getattr(md, "num_decode_reqs", 0) < 1:
+            return False
+        if md.num_actual_tokens - md.num_decode_tokens < FP8KV_PREFILL_MIN_QUERY or md.max_seq_len < FP8KV_PREFILL_MIN_SEQ:
+            return False
+        if not is_q(self.kv_cache_dtype) or getattr(md, "use_cascade", False):
+            return False
+        if torch.xpu.is_available() and torch.xpu.is_current_stream_capturing():
+            return False
+        if self.alibi_slopes is not None or getattr(self, "sinks", None) is not None:
+            return False
+        if self.logits_soft_cap not in (None, 0, 0.0) or getattr(self, "dcp_world_size", 1) != 1:
+            return False
+        if getattr(self, "attn_type", decoder) != decoder or not getattr(md, "causal", True):
+            return False
+        sw = getattr(md, "sliding_window", None) or self.sliding_window
+        if sw is not None and tuple(sw) != (-1, -1):
+            return False
+        if getattr(md, "mm_prefix_range_tensor", None) is not None or getattr(md, "rswa_prefix_lens", None) is not None:
+            return False
+        return True
+
+    def mixed_forward(self, layer, query, key, value, kv_cache, md, output):
+        """decode rows through the stock kernel on sliced metadata; the one long prefill chunk through the
+        block-dequantized fp16 path (a mixed step otherwise runs FA2 on fp8 K/V, ~1.8x slower, and every decode
+        stream waits for it: the multi-second stalls under interleaved load)"""
+        nd, ndt, n = md.num_decode_reqs, md.num_decode_tokens, md.num_actual_tokens
+        if not getattr(cls, "_exl3_mixed_logged", False):
+            cls._exl3_mixed_logged = True
+            logger.info("exl3xpu: mixed fp8-KV step: %d decode reqs (%d tokens) + prefill chunk of %d tokens",
+                        nd, ndt, n - ndt)
+        dmd = copy.copy(md)
+        dmd.num_actual_tokens = ndt
+        dmd.query_start_loc = md.query_start_loc[: nd + 1]
+        dmd.seq_lens = md.seq_lens[:nd]
+        dmd.block_table = md.block_table[:nd]
+        dmd.slot_mapping = md.slot_mapping[:ndt]
+        dmd.max_query_len = ndt
+        dmd.num_prefill_reqs, dmd.num_prefill_tokens = 0, 0
+        if getattr(dmd, "scheduler_metadata", None) is not None:
+            dmd.scheduler_metadata = None
+        orig(self, layer, query[:ndt], key[:ndt] if key is not None else None, value[:ndt] if value is not None else None,
+             kv_cache, dmd, output[:ndt])
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache = key_cache.view(fp8_dtype)
+        value_cache = value_cache.view(fp8_dtype)
+        q = query[ndt:n]
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            q = (q.float() * float(layer._q_scale)).to(torch.float16)
+        out = output[ndt:n].view(n - ndt, q.shape[1], self.head_size)
+        tmp = out if out.dtype == torch.float16 else torch.empty(out.shape, dtype=torch.float16, device=out.device)
+        ks = getattr(layer, "_k_scale_float", None)
+        vs = getattr(layer, "_v_scale_float", None)
+        ks = float(layer._k_scale) if ks is None else float(ks)
+        vs = float(layer._v_scale) if vs is None else float(vs)
+        seq_len = int(md.seq_lens[nd].item())
+        prefill_attention(q.to(torch.float16), key_cache, value_cache, md.block_table[nd], seq_len,
+                          ks, vs, float(self.scale), tmp)
+        if tmp is not out:
+            out.copy_(tmp)
+        return output
+
     def forward(self, layer, query, key, value, kv_cache, attn_metadata, output,
                 output_scale=None, output_block_scale=None):
         md = attn_metadata
         if not eligible(self, md, output_scale, output_block_scale):
+            if mixed_eligible(self, md, output_scale, output_block_scale):
+                return mixed_forward(self, layer, query, key, value, kv_cache, md, output)
             return orig(self, layer, query, key, value, kv_cache, attn_metadata, output,
                         output_scale, output_block_scale)
         n = md.num_actual_tokens

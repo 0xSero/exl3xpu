@@ -338,3 +338,9 @@ prefill chunk of a long prompt, batched with the 4 decode streams, attending ove
 block-dequant fp8 prefill path only fires for single-sequence batches, so mixed batches take vLLM FA2 on fp8
 KV (~1.8x slower). Next: extend the fp8-KV prefill patch to mixed batches (prefill rows via block-dequant FA,
 decode rows via the stock path). Decode 177.4 tok/s, TTFT 1K/8K/32K p50 0.94/5.41/25.2 s.
+Mixed-batch fp8-KV prefill path (decode rows stock, one long prefill chunk via block-dequant): 32K needle under
+4-stream load 3/3, but it never fired (the XPU FA metadata does not populate num_decode_reqs/num_prefill_reqs)
+and the stall did not change (3.72 s). The stall is the prefill step itself: 4096-token chunks take ~3.1 s
+(last chunk at ~32K context ~3.7 s) and decode waits a full step. Left opt-in (EXL3_FP8KV_MIXED=1).
+Recipe default max_num_batched_tokens 8192 -> 2048: max decode wait 7.1 -> ~2 s under interleaved load, decode
+-3%, 32K prefill ~-6%.
