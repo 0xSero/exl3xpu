@@ -421,3 +421,9 @@ default for hybrid GDN models, and model.yaml never set it. Now explicit `enable
   Gen speed) or ASPM; earlier C16 DEVICE_LOST episodes may be the same fault. Needs a hardware/BIOS decision
   (force lower PCIe gen, pcie_aspm=off, reseat/replace risers) — not changed without the owner.
 - The t=0.7 pc-on panel before the drop (prose C16 249.7) is suspect; cells after 13:08 are invalid.
+
+### Codebook lookup table (EXL3_LUT) in the GEMV (2026-09-24): REJECTED
+65,536-entry fp16 table (filled by decode_cb_h itself, so bit-exact by construction) in global memory, L1-cached,
+replacing mul + dp4a + mad with one gather per weight. All linears, graph-captured, B70 #1, 3 alternating reps:
+M=1 27.24 -> 107.65 ms (481 -> 122 GB/s), M=2 31.6 -> 106.5 ms. The per-lane gather rate is ~4x below the ALU
+decode rate; an SLM table would need a 128 KB refill per work-group (more bytes than the weights). Left opt-in.
