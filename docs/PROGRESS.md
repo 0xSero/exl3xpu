@@ -346,3 +346,6 @@ Recipe default max_num_batched_tokens 8192 -> 2048: max decode wait 7.1 -> ~2 s 
 -3%, 32K prefill ~-6%.
 Prefill by chunk (cold, one request): 2048: 4K 1576, 32K 1411, 128K 954 (breaks T2), 254K 672; 4096: 1654 / 1483 /
 1020 / 726; 8192: 1589 / 1497 / 1049 / 763. Default set to 4096 (T2 holds, decode wait behind a long prompt 7.1 -> 3.7 s).
+MTP k=2 at C16 thinking on (exact KV blocks): all 16 streams resident (84-93% KV); prose 409.9 -> 460.2, code
+344.2 -> 383.5 agg (+11-12%). k=2 loses at C1-C4 (C1 prose 61.9 vs 70.3, C4 219.5 vs 237.5), and dynamic SD
+cannot switch k on this driver, so default stays k=3; k=2 is the many-users variant.
