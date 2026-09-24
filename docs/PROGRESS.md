@@ -433,3 +433,14 @@ Baseline (prefix caching on, chunk 4096) got through 4K 1545 and 32K 1421 tok/s,
 during the 128K prefill (pciehp Slot(19) Link Down, re-enumerated as renderD133) about 5 min into load.
 B70 #1 link drops today: 15:08, 16:19, 20:32 (earlier ones needed ~20-25 min of decode; this one ~5 min of prefill).
 GPU work on B70 #1 halted until the link is fixed.
+
+### Long-context (200K+) baseline, B70 #1 (2026-09-24, halted by a 4th PCIe drop)
+Canonical recipe (MTP k=3, fp8 KV, prefix caching on, align mode, 4096 budget = 3200-token chunks), exl3dev2
+container on renderD133. Cold prefill, one request, one wave: 196K **775 tok/s** (TTFT 254 s), 254K **650 tok/s**
+(TTFT 391 s; 726 without prefix caching, the align-mode chunk rounding costs ~10% here).
+sweep.py `--decode-ctx 200000` is invalid (45 s window ends inside the 254 s prefill): added `bench/longctx.py`
+(cold request, then a same-document warm request; per-stream decode after the first token, thinking on).
+Its first run logged nothing: the engine went silent at 22:45 (no stats lines) and B70 #1 dropped off the bus
+at 00:49 (Slot 19 Link Down, 4th time in 34 h). No decode-at-200K number yet.
+Next once a stable card is available: longctx.py at 131K/200K; then max_num_batched_tokens 6400/9600 for
+long prompts (fewer align chunks) against interleave stall.
