@@ -411,3 +411,13 @@ default for hybrid GDN models, and model.yaml never set it. Now explicit `enable
 - `patch_align_sync` (skip that sync except on GDN block crossings / batch changes): greedy 7/8 exact vs
   unpatched, same as unpatched-vs-unpatched 7/8 (one near-tie flip, prompt 1) -> correct; speed C8 prose
   337.7 vs 337.8, code 332.6 vs 331.5 -> no gain. REJECTED as default, kept opt-in (EXL3_ALIGN_SYNC_SKIP=1).
+
+## 2026-09-24: HARDWARE — B70 PCIe links are unstable (root cause of the "crashes")
+- 13:08 (container clock) our server died mid-panel ("Abort ... drm_neo.cpp:445", REQ_FAIL from code C4). Kernel:
+  AER Data Link Layer Timeout on port c0:01.1, then `pciehp: Slot(19): Link Down / Card not present`, xe re-probed
+  c3:00.0 (B70 #1), render node renumbered D132 -> D133.
+- Journal: 5 link-down events in 7 days (80:03.1 = B70 #0 slot: Sep 17, 21, 23; c0:01.1 = B70 #1 slot: Sep 23, 24).
+  Correctable replay timeouts today: c0:01.1 1280, 80:03.1 334, others 24. Likely signal integrity (risers /
+  Gen speed) or ASPM; earlier C16 DEVICE_LOST episodes may be the same fault. Needs a hardware/BIOS decision
+  (force lower PCIe gen, pcie_aspm=off, reseat/replace risers) — not changed without the owner.
+- The t=0.7 pc-on panel before the drop (prose C16 249.7) is suspect; cells after 13:08 are invalid.

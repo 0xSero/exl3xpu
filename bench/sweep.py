@@ -182,6 +182,15 @@ def count_tokens(text: str) -> int:
     return max(1, len(_TOK(text, add_special_tokens=False)["input_ids"]))
 
 
+def _auth_headers() -> dict:
+    """Bearer token for gateways that require one: read from the file named by EXL3_API_KEY_FILE (never logged)."""
+    f = os.environ.get("EXL3_API_KEY_FILE")
+    if not f:
+        return {}
+    with open(f) as fh:
+        return {"Authorization": "Bearer " + fh.read().strip()}
+
+
 async def stream_one(session, url, model, prompt, max_tokens, temperature, thinking, rec):
     # times[i] is a token arrival: a chunk carrying n tokens (speculative decoding emits several per chunk)
     # appends its timestamp n times. n comes from vLLM's cumulative per-chunk usage when available,
@@ -195,7 +204,7 @@ async def stream_one(session, url, model, prompt, max_tokens, temperature, think
     t_send = time.time()
     rec.update(t_send=t_send, times=[], ok=False, prompt_tokens=None, completion_tokens=None)
     try:
-        async with session.post(url, json=body) as r:
+        async with session.post(url, json=body, headers=_auth_headers()) as r:
             if r.status != 200:
                 rec["error"] = f"HTTP {r.status}: {(await r.text())[:300]}"
                 rec["t_end"] = time.time()
@@ -251,7 +260,7 @@ async def spec_counters(base):
     """(accepted draft tokens, drafts) from vLLM's Prometheus metrics, or None."""
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
-            async with s.get(base + "/metrics") as r:
+            async with s.get(base + "/metrics", headers=_auth_headers()) as r:
                 txt = await r.text()
     except Exception:
         return None
