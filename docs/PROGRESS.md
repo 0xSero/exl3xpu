@@ -354,3 +354,11 @@ tokens but still 13-14 of 16 streams resident; C16 thinking prose 409.5, code 33
 mamba_cache_mode default + prefix caching off (with exact blocks, k=3): pool 284,485 tokens, still 14 of 16 streams
 resident; C16 thinking prose 405.6, code 345.5 (flat). Rejected. The per-stream GDN state copies for k=3 speculation
 are the limit; only k=2 (fewer copies) fits all 16. Remaining capacity lever: smaller GDN state (own kernels).
+
+### Realistic panel (2026-09-24): Gutenberg prose, HumanEval / real-source code, temperature 0.7, cap 16384
+bench/sweep.py --corpus real (bench/fetch_corpus.sh), thinking on, current default build, agg tok/s (prose / code):
+C1 91.2 / 66.1 (accept 3.42 / 2.75), C2 151.4 / 125.3, C4 262.6 / 212.9, C8 357.1 / 321.7, C16 365.2 / 350.0.
+vs the synthetic greedy panel: C1-C8 equal or higher (real prose drafts better), C16 prose lower (thinking runs past
+the old 2048 cap, more KV per stream). These become the headline numbers; the synthetic panel stays as reference.
+k=2 many-users panel (noise corpus) prose C1 65.8, C2 123.5, C4 227.6, C8 337.4, C16 435.7; code C1 59.0, C2 107.8,
+C4 188.9 (C8/C16 code invalid: server killed by an overlapping run; to redo).
