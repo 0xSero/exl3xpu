@@ -494,3 +494,4 @@ Notes: turns are short tool calls (~200 output tokens p50), so per-stream decode
 first steps; B70 #1 logged 1,896 corrected AER errors during the run (its decode path is unchanged code), and the
 live service may have had other traffic. The gateway does not report cached_tokens, so the harness's
 "uncached prefill" figure is not meaningful here and is omitted. First v2 replay OOMed (fixed, above).
+- New image 5d8630ed (int8 on by default): 32K cold prefill 2124 tok/s on B70 #1, registry acceptance decode 81.2 tok/s, tool call ok; local-ai-registry PR #97.

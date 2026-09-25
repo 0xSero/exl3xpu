@@ -34,10 +34,10 @@ aggregate tok/s; the synthetic greedy panel (random-word prompts, fixed tasks, 2
 
 Cold prefill, one request (tok/s; with prefix caching on, which the recipe needs for multi-turn agents):
 
-| prompt | fp16 prefill (default) | int8 prefill (opt-in, `EXL3_INT8_PREFILL=1`) |
+| prompt | fp16 prefill (`EXL3_INT8_PREFILL=0`) | int8 prefill (default since 2026-09-25) |
 |---|---|---|
 | 4K | 1,654 | – |
-| 32K | 1,434 | **1,979** |
+| 32K | 1,434 | **2,124** |
 | 128K | 928 | **1,135** |
 | 196K | 775 | – |
 | 254K | 650 | – |
@@ -47,14 +47,14 @@ Real agent traffic (40 recorded omp sessions replayed turn by turn with tools, t
 TTFT p50 / p95 4.65 / 9.00 s with fp16 prefill, **3.78 / 8.30 s** with int8 prefill; the 24 turns took 193 s vs
 **147 s**. Raw rows in `docs/PROGRESS.md` ("omp session replay").
 
-### int8 prefill (opt-in)
+### int8 prefill (on by default)
 
 Prefill linears (more than 128 tokens) can run in int8 on the XMX units at twice the fp16 rate. The GEMM already
 runs in the Hadamard domain, where activations have no outliers, and every mul1 codebook value is bounded by
 3.453125, so activations get one int8 scale per row (fused into the input Hadamard) and weights one static scale
 (fused into reconstruct); oneDNN runs the s8 GEMM with both scales applied and writes fp16. All linears at 4,096
 tokens: 1,748 -> 926 ms (1.89x). Cost: teacher-forced NLL on real text +0.17% (1.6439 -> 1.6467), top-1 agreement
-with fp16 prefill 97.2%. Decode is unchanged and stays bit-exact. Enable with `-e EXL3_INT8_PREFILL=1`.
+with fp16 prefill 97.2%. Decode is unchanged and stays bit-exact. On in `model.yaml`; turn it off with `-e EXL3_INT8_PREFILL=0`.
 
 Same card, tuned llama.cpp SYCL Q4_K_M (`qwen38-q4km-arcb70-llamacpp-tp1`): C1 25.0, C8 56.8, C16 56.0
 aggregate; prefill 4K 999, 32K 629 tok/s.
@@ -86,10 +86,10 @@ docs/             DESIGN.md (format + kernels), GOAL.md, PROGRESS.md (tuning log
 ## Run
 
 Published, attested image (built by `.github/workflows/release-image.yml` from this repo; verify with
-`gh attestation verify oci://ghcr.io/0xsero/exl3xpu@sha256:86276b00c9f0161e7e7ccba1e683ca622679466a5c855e952b375ddbb6ec57c4 -o 0xSero`):
+`gh attestation verify oci://ghcr.io/0xsero/exl3xpu@sha256:5d8630ed6a1a066c5e51d853372df4a6c210ede7c4448d703c8bb669f7dcec3d -o 0xSero`):
 
 ```bash
-IMG=ghcr.io/0xsero/exl3xpu@sha256:86276b00c9f0161e7e7ccba1e683ca622679466a5c855e952b375ddbb6ec57c4
+IMG=ghcr.io/0xsero/exl3xpu@sha256:5d8630ed6a1a066c5e51d853372df4a6c210ede7c4448d703c8bb669f7dcec3d
 hf download turboderp/Qwen3.8-27B-exl3 --revision 113cf7ab958054860e43fb7f3063b1af19171095 \
   --local-dir $MODELS/turboderp-Qwen3.8-27B-exl3-4.00bpw
 
@@ -147,6 +147,5 @@ Validated and recommended B70 recipe in [local-ai-registry](https://github.com/0
 (`qwen38-27b-exl3-4bpw-arcb70-vllm-exl3xpu-tp1`). Weights bit-exact vs exllamav3 on every kernel path
 (vector M=1/2/4, DPAS M=3..64); logits vs exllamav3 on a 3090: top-1 99.63%, KL 9.8e-5. Vision (32 numbered
 images read back in order), video and a 128K needle test pass. Open items: 200K+ prefill (650-775 tok/s) is bound by
-attention (fp16 FA2 at ~76 TFLOPS; an int8 attention kernel is the next step); int8 prefill is opt-in pending a
-decision on its +0.17% NLL cost; at C16 with thinking on ~14 of 16 streams fit the KV pool.
+attention (fp16 FA2 at ~76 TFLOPS; an int8 attention kernel is the next step); at C16 with thinking on ~14 of 16 streams fit the KV pool.
 Log in `docs/PROGRESS.md`.
