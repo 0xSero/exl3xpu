@@ -495,3 +495,14 @@ first steps; B70 #1 logged 1,896 corrected AER errors during the run (its decode
 live service may have had other traffic. The gateway does not report cached_tokens, so the harness's
 "uncached prefill" figure is not meaningful here and is omitted. First v2 replay OOMed (fixed, above).
 - New image 5d8630ed (int8 on by default): 32K cold prefill 2124 tok/s on B70 #1, registry acceptance decode 81.2 tok/s, tool call ok; local-ai-registry PR #97.
+
+### Where a 32K prefill goes now (int8 prefill, vLLM torch profiler, 2026-09-25)
+One cold 32K prompt at 2,108 tok/s (15.5 s), XPU kernel time by stage:
+| stage | time | share | note |
+|---|---|---|---|
+| int8 GEMM (oneDNN) | 6.19 s | ~40% | ~286 TOPS: at the measured int8 ceiling |
+| had_out / reconstruct / had_in (int8) | 1.00 / 0.74 / 0.62 s | ~15% | had_out bandwidth-bound; reconstruct re-decodes all weights every chunk |
+| full attention (cutlass XeFMHA, fp16, prefix blocks + causal) | 2.92 + 0.34 s | ~21% | 17 ms per prefix call; grows with context |
+| GDN (gdn_attention + chunk kernels) | ~2.3 s | ~15% | |
+| norms / activations / copies | ~1.5 s | ~9% | |
+Linears are done; further prefill gains need attention (int8 QK^T, SageAttention-style) and GDN.
