@@ -34,7 +34,7 @@ aggregate tok/s; the synthetic greedy panel (random-word prompts, fixed tasks, 2
 
 Cold prefill, one request (tok/s; with prefix caching on, which the recipe needs for multi-turn agents):
 
-| prompt | fp16 prefill (`EXL3_INT8_PREFILL=0`) | int8 prefill (default since 2026-09-25) |
+| prompt | fp16 prefill (`EXL3_INT8_PREFILL: "0"`) | int8 prefill (default since 2026-09-25) |
 |---|---|---|
 | 4K | 1,654 | – |
 | 32K | 1,434 | **2,124** |
@@ -54,7 +54,7 @@ runs in the Hadamard domain, where activations have no outliers, and every mul1 
 3.453125, so activations get one int8 scale per row (fused into the input Hadamard) and weights one static scale
 (fused into reconstruct); oneDNN runs the s8 GEMM with both scales applied and writes fp16. All linears at 4,096
 tokens: 1,748 -> 926 ms (1.89x). Cost: teacher-forced NLL on real text +0.17% (1.6439 -> 1.6467), top-1 agreement
-with fp16 prefill 97.2%. Decode is unchanged and stays bit-exact. On in `model.yaml`; turn it off with `-e EXL3_INT8_PREFILL=0`.
+with fp16 prefill 97.2%. Decode is unchanged and stays bit-exact. On in `model.yaml` (`EXL3_INT8_PREFILL: "1"`); set it to `"0"` there to go back to fp16 prefill (model.yaml env overrides `docker -e`).
 
 Same card, tuned llama.cpp SYCL Q4_K_M (`qwen38-q4km-arcb70-llamacpp-tp1`): C1 25.0, C8 56.8, C16 56.0
 aggregate; prefill 4K 999, 32K 629 tok/s.
