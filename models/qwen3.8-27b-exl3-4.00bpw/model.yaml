@@ -42,6 +42,7 @@ env:
   EXL3_DRAFT_VOCAB: "{model_dir}/draft_vocab.json"   # pruned MTP draft head (scripts/draft_vocab.py)
   EXL3_KV_BLOCK_EXACT: "1"   # keep 1600-token KV blocks (not 2048): C16 thinking 10 -> 14 streams, +17% agg
   VLLM_WORKER_MULTIPROC_METHOD: spawn
+  EXL3_INT8_PREFILL: "1"   # W8A8 prefill linears: 32K 1434 -> 1979 tok/s, omp replay TTFT p50 4.65 -> 3.78 s; NLL +0.17%
 
 # Data parallel: one replica per GPU behind scripts/lb.py (the model fits one 32 GB B70).
 parallel:
