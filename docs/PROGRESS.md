@@ -524,3 +524,14 @@ padded to 256 at the top (exact). Each distinct seq_len compiles once (cached).
   vs the fp16 recipe of this morning (1654 / 1434 / 928 / 650): 1.46x / 1.58x / 1.52x / 1.40x.
 - Needle with oneDNN attention + int8 prefill: 3/3 at 131K, 3/3 at 240K. Promoted to model.yaml (EXL3_ONEDNN_ATTN=1).
 - Image 21412bdd (int8 prefill + oneDNN attention): 32K 2204 / 128K 1359 tok/s on the published digest, acceptance decode 85.9 tok/s, tool call ok; local-ai-registry PR #102.
+
+### Evals: Terminal-Bench 2.1 attempt (2026-09-25), halted by a 5th B70 #1 PCIe drop
+Harbor (omarchy ~/terminal-bench/framework/run.sh, + --n-attempts), dataset terminal-bench/terminal-bench-2-1,
+agent terminus-2, 2 attempts x 89 tasks, C8, timeout x20 / agent x100, model = image 21412bdd on B70 #1 (:8102),
+thinking on. Traces: omarchy ~/terminal-bench/runs/full/qwen38-b70-20260925T192042Z (copy on the Mac under
+~/terminal-bench/runs/omarchy-qwen38-b70/). B70 #1 dropped at 21:37 (slot 19 Link Down) ~17 min in.
+Valid trials before the drop: 5 finished by the verifier, 4 passed (kv-store-grpc, log-summary-date-ranges,
+openssl-selfsigned-cert, pypi-server), 1 failed (torch-tensor-parallelism); qemu-alpine-ssh failed in the harness
+(tmux did not start); the rest are connection errors / cancellations from the drop (not model results).
+At C8: 7 requests running, KV 77%, ~250 tok/s aggregate, no preemptions.
+GPQA Diamond not run: the dataset is gated and neither the omarchy nor the Mac HF token has access.
