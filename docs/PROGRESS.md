@@ -478,3 +478,19 @@ bytes), had_in has one thread per row; attention is untouched, so the 200K+ gain
   after 6 requests: oneDNN's library-mode scratchpad lives outside torch's allocator (not in vLLM's memory
   budget), and every new token count built a new primitive. Fix: user-mode scratchpad allocated through torch,
   GEMM rows padded to multiples of 256 (at most 16 primitives per (K, N)). M=1000 1.78x, M=4096 1.89x, PASS.
+
+### omp session replay, real agent traffic (2026-09-25)
+~/tuning-kit bench.py `replay:2` (40 real omp sessions, tools + thinking on, temperature 1; 2 sessions x 12 turns,
+same session order for both). Live = user's service on B70 #0 (canonical recipe, fp16 prefill, via the gateway);
+int8 = same recipe + EXL3_INT8_PREFILL (v2 + OOM fix) on B70 #1.
+| | live (B70 #0) | int8 prefill (B70 #1) |
+|---|---|---|
+| turns ok / tool-call turns / loops | 24/24 / 24 / 0 | 24/24 / 24 / 0 |
+| prompt tokens p50 / max | 18,214 / 62,947 | 18,214 / 62,947 |
+| TTFT p50 / p95 | 4.65 / 9.00 s | **3.78 / 8.30 s** |
+| wall time for the 24 turns | 193 s | **147 s** |
+| decode per stream p50 | 52.1 | 34.2 (see note) |
+Notes: turns are short tool calls (~200 output tokens p50), so per-stream decode is noisy and dominated by the
+first steps; B70 #1 logged 1,896 corrected AER errors during the run (its decode path is unchanged code), and the
+live service may have had other traffic. The gateway does not report cached_tokens, so the harness's
+"uncached prefill" figure is not meaningful here and is omitted. First v2 replay OOMed (fixed, above).
