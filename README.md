@@ -32,7 +32,29 @@ aggregate tok/s; the synthetic greedy panel (random-word prompts, fixed tasks, 2
 | 8 | **357.1** (362.6) | **321.7** (294.3) |
 | 16 | **365.2** (409.9) | **350.0** (344.2) |
 
-Cold prefill, one request: 4K **1,654**, 32K **1,483**, 128K **1,020**, 254K **726** tok/s (4096-token prefill chunks).
+Cold prefill, one request (tok/s; with prefix caching on, which the recipe needs for multi-turn agents):
+
+| prompt | fp16 prefill (default) | int8 prefill (opt-in, `EXL3_INT8_PREFILL=1`) |
+|---|---|---|
+| 4K | 1,654 | – |
+| 32K | 1,434 | **1,979** |
+| 128K | 928 | **1,135** |
+| 196K | 775 | – |
+| 254K | 650 | – |
+
+Real agent traffic (40 recorded omp sessions replayed turn by turn with tools, thinking on, temperature 1;
+2 sessions x 12 turns, prompts 18K median / 63K max): 24/24 turns ok, every turn a tool call, no loops.
+TTFT p50 / p95 4.65 / 9.00 s with fp16 prefill, **3.78 / 8.30 s** with int8 prefill; the 24 turns took 193 s vs
+**147 s**. Raw rows in `docs/PROGRESS.md` ("omp session replay").
+
+### int8 prefill (opt-in)
+
+Prefill linears (more than 128 tokens) can run in int8 on the XMX units at twice the fp16 rate. The GEMM already
+runs in the Hadamard domain, where activations have no outliers, and every mul1 codebook value is bounded by
+3.453125, so activations get one int8 scale per row (fused into the input Hadamard) and weights one static scale
+(fused into reconstruct); oneDNN runs the s8 GEMM with both scales applied and writes fp16. All linears at 4,096
+tokens: 1,748 -> 926 ms (1.89x). Cost: teacher-forced NLL on real text +0.17% (1.6439 -> 1.6467), top-1 agreement
+with fp16 prefill 97.2%. Decode is unchanged and stays bit-exact. Enable with `-e EXL3_INT8_PREFILL=1`.
 
 Same card, tuned llama.cpp SYCL Q4_K_M (`qwen38-q4km-arcb70-llamacpp-tp1`): C1 25.0, C8 56.8, C16 56.0
 aggregate; prefill 4K 999, 32K 629 tok/s.
@@ -103,6 +125,9 @@ python3 bench/vision_bench.py --base http://localhost:8000
 python3 bench/linear_budget.py 1 4 16 64               # kernel-only time of all EXL3 linears
 python3 tests/test_bitexact_xpu.py                     # Gate A1: every kernel path vs exllamav3 reconstruct
 python3 tests/test_needle.py http://localhost:8000 131072; python3 tests/test_vision.py http://localhost:8000
+python3 bench/longctx.py --base http://localhost:8000 --ctx 131072,200000   # cold + same-document warm turn, decode after TTFT
+EXL3_INT8_PREFILL=1 python3 tests/test_int8_prefill.py 4096   # int8 kernels vs a torch reference, time per layer
+python3 tests/prefill_nll.py --base http://localhost:8000 --out a.json [--compare b.json]  # prefill numerics A/B
 ```
 
 Raw rows of every measurement are in `bench/results/`; every kept and rejected step, with numbers, is in
@@ -121,6 +146,7 @@ use data parallel.
 Validated and recommended B70 recipe in [local-ai-registry](https://github.com/0xSero/local-ai-registry)
 (`qwen38-27b-exl3-4bpw-arcb70-vllm-exl3xpu-tp1`). Weights bit-exact vs exllamav3 on every kernel path
 (vector M=1/2/4, DPAS M=3..64); logits vs exllamav3 on a 3090: top-1 99.63%, KL 9.8e-5. Vision (32 numbered
-images read back in order), video and a 128K needle test pass. Open items: 256K prefill (726 tok/s) is bound by
-fp8 attention; at C16 with thinking on ~14 of 16 streams fit the KV pool (MTP k=2 fits all 16 but loses at C1-C8).
+images read back in order), video and a 128K needle test pass. Open items: 200K+ prefill (650-775 tok/s) is bound by
+attention (fp16 FA2 at ~76 TFLOPS; an int8 attention kernel is the next step); int8 prefill is opt-in pending a
+decision on its +0.17% NLL cost; at C16 with thinking on ~14 of 16 streams fit the KV pool.
 Log in `docs/PROGRESS.md`.
