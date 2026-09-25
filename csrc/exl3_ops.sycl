@@ -346,12 +346,13 @@ static Ctx& ctx(sycl::queue& q) {
     }
     return it->second;
 }
-static void gemm(sycl::queue& q, const int8_t* xq, const int8_t* wq, const float* sw_dev, const float* sx, fp16* y,
+static void gemm(sycl::queue& q, const at::Tensor& like, const int8_t* xq, const int8_t* wq, const float* sw_dev, const float* sx, fp16* y,
                    int64_t M, int64_t K, int64_t N, int64_t ldy) {
     using namespace dnnl;
     using dt = memory::data_type;
     auto& c = ctx(q);
-    static std::map<std::tuple<int64_t, int64_t, int64_t, int64_t>, dnnl::matmul> cache;
+    // scratchpad in user mode, allocated through torch (library-mode scratch lives outside vLLM's memory budget)
+    static std::map<std::tuple<int64_t, int64_t, int64_t, int64_t>, std::pair<dnnl::matmul, size_t>> cache;
     auto key = std::make_tuple(M, K, N, ldy);
     memory::desc a_md({M, K}, dt::s8, memory::dims{K, 1});
     memory::desc b_md({K, N}, dt::s8, memory::dims{N, 1});
@@ -365,15 +366,20 @@ static void gemm(sycl::queue& q, const int8_t* xq, const int8_t* wq, const float
         post_ops po;
         po.append_binary(algorithm::binary_mul, sx_md);
         attr.set_post_ops(po);
-        it = cache.emplace(key, dnnl::matmul(dnnl::matmul::primitive_desc(c.eng, a_md, b_md, c_md, attr))).first;
+        attr.set_scratchpad_mode(scratchpad_mode::user);
+        auto pd = dnnl::matmul::primitive_desc(c.eng, a_md, b_md, c_md, attr);
+        it = cache.emplace(key, std::make_pair(dnnl::matmul(pd), (size_t)pd.scratchpad_desc().get_size())).first;
     }
+    at::Tensor scratch = at::empty({(int64_t)std::max<size_t>(it->second.second, 1)}, like.options().dtype(at::kByte));
     auto mk = [&](const memory::desc& md, const void* p) {
         return sycl_interop::make_memory(md, c.eng, sycl_interop::memory_kind::usm, const_cast<void*>(p));
     };
-    sycl_interop::execute(it->second, c.strm,
+    memory::desc sp_md({(int64_t)it->second.second}, dt::u8, memory::dims{1});
+    sycl_interop::execute(it->second.first, c.strm,
                           {{DNNL_ARG_SRC, mk(a_md, xq)}, {DNNL_ARG_WEIGHTS, mk(b_md, wq)}, {DNNL_ARG_DST, mk(c_md, y)},
                            {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, mk(sw_md, sw_dev)},
-                           {DNNL_ARG_ATTR_MULTIPLE_POST_OP(0) | DNNL_ARG_SRC_1, mk(sx_md, sx)}});
+                           {DNNL_ARG_ATTR_MULTIPLE_POST_OP(0) | DNNL_ARG_SRC_1, mk(sx_md, sx)},
+                           {DNNL_ARG_SCRATCHPAD, mk(sp_md, scratch.data_ptr())}});
 }
 }  // namespace q8dnnl
 #endif
@@ -522,8 +528,14 @@ at::Tensor exl3_linear(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Ten
     int64_t S = suh.size(0);
     if (g_int8 && cb == 2 && (K == 4 || K == 6) && M > 16) {
         auto& q = queue_of(x2);
-        auto xq = at::empty({S, M, k}, x.options().dtype(at::kChar));
-        auto sx = at::empty({S, M}, x.options().dtype(at::kFloat));
+#ifdef EXL3_DNNL
+        // GEMM rows padded to 256: bounds the number of oneDNN primitives (one per (Ms, K, N)) on real traffic
+        const int64_t Ms = (M + 255) / 256 * 256;
+#else
+        const int64_t Ms = M;
+#endif
+        auto xq = at::empty({S, Ms, k}, x.options().dtype(at::kChar));
+        auto sx = at::empty({S, Ms}, x.options().dtype(at::kFloat));
         int n_in = S * M, local = 8;
         auto run_in = [&](auto tag) {
             using TIn = decltype(tag);
@@ -534,18 +546,18 @@ at::Tensor exl3_linear(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Ten
             if (kb_n <= 8 * 6) {
                 wg(HadInQ8WgKernel<TIn, 8, 6>{reinterpret_cast<const TIn*>(x2.data_ptr()), reinterpret_cast<const fp16*>(suh.data_ptr()),
                                               reinterpret_cast<int8_t*>(xq.data_ptr()), sx.data_ptr<float>(), (int)M, (int)k, (int)S,
-                                              (int)x2.stride(0)}, 8);
+                                              (int)x2.stride(0), (int)Ms}, 8);
                 return;
             }
             if (kb_n <= 16 * 9) {
                 wg(HadInQ8WgKernel<TIn, 16, 9>{reinterpret_cast<const TIn*>(x2.data_ptr()), reinterpret_cast<const fp16*>(suh.data_ptr()),
                                                reinterpret_cast<int8_t*>(xq.data_ptr()), sx.data_ptr<float>(), (int)M, (int)k, (int)S,
-                                               (int)x2.stride(0)}, 16);
+                                               (int)x2.stride(0), (int)Ms}, 16);
                 return;
             }
             HadInQ8Kernel<TIn> kin{reinterpret_cast<const TIn*>(x2.data_ptr()), reinterpret_cast<const fp16*>(suh.data_ptr()),
                                    reinterpret_cast<int8_t*>(xq.data_ptr()), sx.data_ptr<float>(), (int)M, (int)k, (int)S,
-                                   (int)x2.stride(0)};
+                                   (int)x2.stride(0), (int)Ms};
             q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n_in, local), local), kin); });
         };
         if (x2.scalar_type() == at::kHalf) run_in(fp16{});
@@ -557,16 +569,16 @@ at::Tensor exl3_linear(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Ten
             static std::vector<at::Tensor> swd(16);
             auto& swt = swd.at(x.device().index());
             if (!swt.defined()) swt = at::full({1}, sw, x.options().dtype(at::kFloat));
-            auto y = at::empty({M, n}, x.options().dtype(at::kHalf));
+            auto y = at::empty({Ms, n}, x.options().dtype(at::kHalf));
             for (size_t g = 0; g + 1 < group_bounds.size(); ++g) {
                 int64_t g0 = group_bounds[g], g1 = group_bounds[g + 1], ng = g1 - g0;
                 auto w = at::empty({k, ng}, x.options().dtype(at::kChar));
                 if (K == 4) launch_reconstruct_q8<4>(trellis, w, g0, q); else launch_reconstruct_q8<6>(trellis, w, g0, q);
-                q8dnnl::gemm(q, reinterpret_cast<const int8_t*>(xq.data_ptr()) + g * M * k,
-                               reinterpret_cast<const int8_t*>(w.data_ptr()), swt.data_ptr<float>(),
-                               sx.data_ptr<float>() + g * M, reinterpret_cast<fp16*>(y.data_ptr()) + g0, M, k, ng, n);
+                q8dnnl::gemm(q, x, reinterpret_cast<const int8_t*>(xq.data_ptr()) + g * Ms * k,
+                             reinterpret_cast<const int8_t*>(w.data_ptr()), swt.data_ptr<float>(),
+                             sx.data_ptr<float>() + g * Ms, reinterpret_cast<fp16*>(y.data_ptr()) + g0, Ms, k, ng, n);
             }
-            exl3_had_out_h(y, svh, out);
+            exl3_had_out_h(y.narrow(0, 0, M), svh, out);
             return out.view(shape);
         }
 #endif

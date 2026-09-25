@@ -344,7 +344,7 @@ struct HadOutKernel {
 template <typename TIn>
 struct HadInQ8Kernel {
     const TIn* x; const fp16* suh; int8_t* xq; float* sx;
-    int M, Kdim, S, x_stride;
+    int M, Kdim, S, x_stride, Ms;   // Ms: row stride of xq / sx (M padded for the GEMM)
     ESIMD_INLINE simd<float, 128> blk(int g, int m, int kb) const {
         simd<TIn, 128> xi = block_load<TIn, 128>(x + (size_t)m * x_stride + kb * 128);
         simd<fp16, 128> su = block_load<fp16, 128>(suh + (size_t)g * Kdim + kb * 128);
@@ -365,9 +365,9 @@ struct HadInQ8Kernel {
         float amax = hmax<float>(mx);
         float sc = amax > 0.0f ? amax / 127.0f : 1.0f;
         float inv = 1.0f / sc;
-        sx[(size_t)g * M + m] = sc;
+        sx[(size_t)g * Ms + m] = sc;
         for (int kb = 0; kb < kb_n; ++kb)
-            block_store<int8_t, 128>(xq + ((size_t)g * M + m) * Kdim + kb * 128,
+            block_store<int8_t, 128>(xq + ((size_t)g * Ms + m) * Kdim + kb * 128,
                                      convert<int8_t>(rnde<float>(blk(g, m, kb) * inv)));
     }
 };
@@ -377,7 +377,7 @@ struct HadInQ8Kernel {
 template <typename TIn, int TPR, int NB>
 struct HadInQ8WgKernel {
     const TIn* x; const fp16* suh; int8_t* xq; float* sx;
-    int M, Kdim, S, x_stride;
+    int M, Kdim, S, x_stride, Ms;
     void operator()(sycl::nd_item<1> it) const SYCL_ESIMD_KERNEL {
         slm_init<TPR * sizeof(float)>();
         int t = it.get_local_id(0);
@@ -406,14 +406,14 @@ struct HadInQ8WgKernel {
         float amax = hmax<float>(slm_block_load<float, TPR>(0));
         float sc = amax > 0.0f ? amax / 127.0f : 1.0f;
         float inv = 1.0f / sc;
-        if (t == 0) sx[(size_t)g * M + m] = sc;
+        if (t == 0) sx[(size_t)g * Ms + m] = sc;
 #pragma unroll
         for (int j = 0; j < NB; ++j) {
             int kb = t + j * TPR;
             if (kb < kb_n) {
                 simd<fp16, 128> b = buf.template select<128, 1>(j * 128);
                 simd<float, 128> r = rnde<float>(convert<float>(b) * inv);
-                block_store<int8_t, 128>(xq + ((size_t)g * M + m) * Kdim + kb * 128, convert<int8_t>(r));
+                block_store<int8_t, 128>(xq + ((size_t)g * Ms + m) * Kdim + kb * 128, convert<int8_t>(r));
             }
         }
     }

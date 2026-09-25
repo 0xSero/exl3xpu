@@ -474,3 +474,7 @@ bytes), had_in has one thread per row; attention is untouched, so the 200K+ gain
   Layer replay Timeout; 31k Hardware Error lines by 09:20, 483 from c0:01.1) and the engine stalled mid 4K
   prefill at 06:52 with no log for 2.5 h. Link still trains Gen4 x16; errors are on the physical link (riser/slot).
 - GQA fold for prefix attention (6 q-heads per kv head folded into the query dim, exact): 3200x32K 75.6 -> 71.7 TF, 4096x32K 78.0 -> 73.0 TF. Rejected.
+- omp session replay (real agent traffic) on the v2 build crashed the engine with UR OUT_OF_DEVICE_MEMORY
+  after 6 requests: oneDNN's library-mode scratchpad lives outside torch's allocator (not in vLLM's memory
+  budget), and every new token count built a new primitive. Fix: user-mode scratchpad allocated through torch,
+  GEMM rows padded to multiples of 256 (at most 16 primitives per (K, N)). M=1000 1.78x, M=4096 1.89x, PASS.
