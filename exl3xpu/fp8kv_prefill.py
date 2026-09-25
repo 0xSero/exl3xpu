@@ -14,6 +14,52 @@ import torch
 
 KB_DEFAULT = 32768
 
+import os
+# oneDNN Graph fused SDPA (exl3xpu_C::exl3_sdpa): ~80-90 TF at head_dim 256 vs ~65-70 for FA2 at long L.
+# One call per KV head over the whole [0, seq_len) with a bottom-right causal mask, so no block merge is needed.
+# Queries are padded to multiples of 256 at the top (exact: bottom-right alignment keeps the real rows' mask).
+# Keys must keep their exact length: the fused kernel derives the causal alignment from the dims, and padded keys
+# gave rel err 0.2-0.8 (tests/test_fp8kv_prefill.py). So each distinct seq_len compiles once (cached).
+ONEDNN_ATTN = os.environ.get("EXL3_ONEDNN_ATTN", "0") == "1"
+L_BUCKET = int(os.environ.get("EXL3_ONEDNN_LBUCKET", "1"))
+Q_BUCKET = int(os.environ.get("EXL3_ONEDNN_QBUCKET", "256"))
+
+
+def _onednn_op():
+    from .ops import _get_esimd
+    E = _get_esimd()
+    return E if (E and hasattr(E, "exl3_sdpa")) else None
+
+
+def gather_dequant_head(cache, pages, block_size, seq_len, h, scale, out):
+    """K or V of kv-head h, tokens [0, seq_len), into out[:seq_len] (fp16 [Lpad, D]); out[seq_len:] zeroed."""
+    p1 = (seq_len + block_size - 1) // block_size
+    blk = cache[:, :, h].index_select(0, pages[:p1]).flatten(0, 1)[:seq_len]      # [seq_len, D] fp8
+    torch.mul(blk.to(torch.float16), scale, out=out[:seq_len]) if scale != 1.0 else out[:seq_len].copy_(blk)
+    out[seq_len:].zero_()
+    return out
+
+
+def prefill_attention_onednn(E, q, key_cache, value_cache, pages, seq_len, k_scale, v_scale, scale, out):
+    Q, Hq, D = q.shape
+    Hk, bs = key_cache.shape[2], key_cache.shape[1]
+    G = Hq // Hk
+    Lp = (seq_len + L_BUCKET - 1) // L_BUCKET * L_BUCKET
+    Qp = (Q + Q_BUCKET - 1) // Q_BUCKET * Q_BUCKET
+    kb = torch.empty((1, Lp, D), dtype=torch.float16, device=q.device)
+    vb = torch.empty((1, Lp, D), dtype=torch.float16, device=q.device)
+    qg = torch.zeros((G, Qp, D), dtype=torch.float16, device=q.device)   # real queries are the last Q rows
+    og = torch.empty((G, Qp, D), dtype=torch.float16, device=q.device)
+    none = torch.empty(0, device=q.device)
+    qv, ov = q.view(Q, Hk, G, D), out.view(Q, Hk, G, D)
+    for h in range(Hk):
+        gather_dequant_head(key_cache, pages, bs, seq_len, h, k_scale, kb[0])
+        gather_dequant_head(value_cache, pages, bs, seq_len, h, v_scale, vb[0])
+        qg[:, Qp - Q:].copy_(qv[:, h].permute(1, 0, 2))
+        E.exl3_sdpa_len(qg, kb, vb, og, none, True, scale, seq_len, Qp)
+        ov[:, h].copy_(og[:, Qp - Q:].permute(1, 0, 2))
+    return out
+
 
 def _fa(q, k, v, causal, scale):
     from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
@@ -40,6 +86,10 @@ def prefill_attention(q: torch.Tensor, key_cache: torch.Tensor, value_cache: tor
                       seq_len: int, k_scale: float, v_scale: float, scale: float, out: torch.Tensor,
                       kb: int = KB_DEFAULT) -> torch.Tensor:
     """q: [Q, Hq, D] fp16 (the last Q positions of a seq_len-token sequence; its K/V already in the cache)."""
+    if ONEDNN_ATTN:
+        E = _onednn_op()
+        if E is not None:
+            return prefill_attention_onednn(E, q, key_cache, value_cache, pages, seq_len, k_scale, v_scale, scale, out)
     Q = q.shape[0]
     bs = key_cache.shape[1]
     prefix = seq_len - Q

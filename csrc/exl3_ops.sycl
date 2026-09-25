@@ -384,6 +384,138 @@ static void gemm(sycl::queue& q, const at::Tensor& like, const int8_t* xq, const
 }  // namespace q8dnnl
 #endif
 
+#ifdef EXL3_DNNL
+#include <oneapi/dnnl/dnnl_graph.hpp>
+#include <oneapi/dnnl/dnnl_graph_sycl.hpp>
+#include <c10/xpu/XPUCachingAllocator.h>
+// Prefill attention through oneDNN Graph SDPA (fused, ~95 TF at head_dim 256 vs ~76 for FA2).
+// Head-major: q [Hq, Q, D], k/v [Hk, L, D] fp16 (GQA, Hq = G*Hk), out [Hq, Q, D]; causal = bottom-right aligned.
+// With lse defined ([Hq, Q] f32), the softmax log-sum-exp (natural log) is written there (softmax stats output).
+namespace sdpadnnl {
+using namespace dnnl::graph;
+using lt = logical_tensor;
+static void* alloc_fn(size_t n, size_t, const void*, const void*) { return c10::xpu::XPUCachingAllocator::raw_alloc(n); }
+static void free_fn(void* p, const void*, const void*, void*) { c10::xpu::XPUCachingAllocator::raw_delete(p); }
+struct Ctx { dnnl::engine eng; dnnl::stream strm; };
+static Ctx& ctx(sycl::queue& q) {
+    static std::map<void*, Ctx> m;
+    auto it = m.find((void*)&q);
+    if (it == m.end()) {
+        auto alloc = sycl_interop::make_allocator(alloc_fn, free_fn);
+        auto eng = sycl_interop::make_engine_with_allocator(q.get_device(), q.get_context(), alloc);
+        it = m.emplace((void*)&q, Ctx{eng, dnnl::sycl_interop::make_stream(eng, q)}).first;
+    }
+    return it->second;
+}
+struct Entry { compiled_partition cp; std::vector<lt> ins, outs; };
+static Entry& build(Ctx& c, int64_t Q, int64_t L, int64_t Hq, int64_t Hk, int64_t D, bool causal, bool with_lse) {
+    static std::map<std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, bool, bool>, Entry> cache;
+    auto key = std::make_tuple(Q, L, Hq, Hk, D, causal, with_lse);
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    const int64_t G = Hq / Hk;
+    using dt = lt::data_type;
+    size_t id = 0;
+    // 5D views of the natural vLLM layouts (no copies): [1, Hk, G, Q, D] / [1, Hk, 1, L, D]
+    lt query(id++, dt::f16, {1, Hk, G, Q, D}, {Hq * Q * D, G * Q * D, Q * D, D, 1});
+    lt keyt(id++, dt::f16, {1, Hk, 1, L, D}, {Hk * L * D, L * D, L * D, D, 1});
+    lt score(id++, dt::f32, {1, Hk, G, Q, L}, lt::layout_type::strided);
+    op bmm1(id++, op::kind::MatMul, "bmm1"); bmm1.set_attr<bool>(op::attr::transpose_b, true);
+    bmm1.add_inputs({query, keyt}); bmm1.add_outputs({score});
+    lt scale(id++, dt::f16, lt::dims{1}, lt::layout_type::strided);   // divisor sqrt(D), as in oneDNN's gqa example
+    lt scaled(id++, dt::f32, {1, Hk, G, Q, L}, lt::layout_type::strided);
+    op mul(id++, op::kind::Divide, "scale"); mul.add_inputs({score, scale}); mul.add_outputs({scaled});
+    std::vector<op> ops{bmm1, mul};
+    lt sm_in = scaled;
+    std::vector<lt> extra_ins;
+    if (causal) {
+        lt row(id++, dt::s32, {1, Hk, G, Q, L}, lt::layout_type::strided);
+        op gr(id++, op::kind::GenIndex, "row"); gr.set_attr<int64_t>(op::attr::axis, -2); gr.add_inputs({scaled}); gr.add_outputs({row});
+        lt lk(id++, dt::s32, 0, lt::layout_type::strided, lt::property_type::host_scalar);
+        lt ra(id++, dt::s32, {1, Hk, G, Q, L}, lt::layout_type::strided);
+        op add(id++, op::kind::Add, "row+L"); add.add_inputs({row, lk}); add.add_outputs({ra});
+        lt lq(id++, dt::s32, 0, lt::layout_type::strided, lt::property_type::host_scalar);
+        lt rs(id++, dt::s32, {1, Hk, G, Q, L}, lt::layout_type::strided);
+        op sub(id++, op::kind::Subtract, "-Q"); sub.add_inputs({ra, lq}); sub.add_outputs({rs});
+        lt col(id++, dt::s32, {1, Hk, G, Q, L}, lt::layout_type::strided);
+        op gc(id++, op::kind::GenIndex, "col"); gc.set_attr<int64_t>(op::attr::axis, -1); gc.add_inputs({scaled}); gc.add_outputs({col});
+        lt ge(id++, dt::boolean, {1, Hk, G, Q, L}, lt::layout_type::strided);
+        op gop(id++, op::kind::GreaterEqual, "ge"); gop.add_inputs({rs, col}); gop.add_outputs({ge});
+        lt ninf(id++, dt::f32, lt::dims{1}, lt::layout_type::strided);
+        lt masked(id++, dt::f32, {1, Hk, G, Q, L}, lt::layout_type::strided);
+        op sel(id++, op::kind::Select, "sel"); sel.add_inputs({ge, scaled, ninf}); sel.add_outputs({masked});
+        ops.insert(ops.end(), {gr, add, sub, gc, gop, sel});
+        extra_ins = {lk, lq, ninf};
+        sm_in = masked;
+    }
+    lt probs(id++, dt::f16, {1, Hk, G, Q, L}, lt::layout_type::strided);
+    op sm(id++, op::kind::SoftMax, "softmax"); sm.set_attr<int64_t>(op::attr::axis, -1);
+    sm.set_attr<std::string>(op::attr::mode, "inf_as_zero");
+    sm.add_inputs({sm_in}); 
+    lt stats(id++, dt::f32, {1, Hk, G, Q, 1}, {Hq * Q, G * Q, Q, 1, 1});
+    if (with_lse) sm.add_outputs({probs, stats}); else sm.add_outputs({probs});
+    lt value(id++, dt::f16, {1, Hk, 1, L, D}, {Hk * L * D, L * D, L * D, D, 1});
+    lt output(id++, dt::f16, {1, Hk, G, Q, D}, {Hq * Q * D, G * Q * D, Q * D, D, 1});
+    op bmm2(id++, op::kind::MatMul, "bmm2"); bmm2.add_inputs({probs, value}); bmm2.add_outputs({output});
+    ops.insert(ops.end(), {sm, bmm2});
+    graph g(dnnl::engine::kind::gpu);
+    for (auto& o : ops) g.add_op(o);
+    g.finalize();
+    auto parts = g.get_partitions();
+    TORCH_CHECK(parts.size() == 1, "oneDNN SDPA: pattern not fused (", parts.size(), " partitions)");
+    std::vector<lt> ins{query, keyt, scale};
+    ins.insert(ins.end(), extra_ins.begin(), extra_ins.end());
+    ins.push_back(value);
+    std::vector<lt> outs{output};
+    if (with_lse) outs.push_back(stats);
+    auto cp = parts[0].compile(ins, outs, c.eng);
+    return cache.emplace(key, Entry{cp, ins, outs}).first->second;
+}
+}  // namespace sdpadnnl
+
+static void sdpa_impl(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor out, at::Tensor lse, bool causal, double scale,
+                      int64_t len_k, int64_t len_q);
+void exl3_sdpa(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor out, at::Tensor lse, bool causal, double scale) {
+    sdpa_impl(q, k, v, out, lse, causal, scale, k.size(1), q.size(1));
+}
+// Padded dims, real lengths for the bottom-right mask: keys >= len_k are masked for every row.
+void exl3_sdpa_len(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor out, at::Tensor lse, bool causal, double scale,
+                   int64_t len_k, int64_t len_q) {
+    TORCH_CHECK(causal, "exl3_sdpa_len: causal only");
+    sdpa_impl(q, k, v, out, lse, causal, scale, len_k, len_q);
+}
+static void sdpa_impl(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor out, at::Tensor lse, bool causal, double scale,
+                      int64_t len_k, int64_t len_q) {
+    TORCH_CHECK(q.scalar_type() == at::kHalf && k.scalar_type() == at::kHalf && v.scalar_type() == at::kHalf);
+    TORCH_CHECK(q.is_contiguous() && k.is_contiguous() && v.is_contiguous() && out.is_contiguous());
+    int64_t Hq = q.size(0), Q = q.size(1), D = q.size(2), Hk = k.size(0), L = k.size(1);
+    auto& qq = queue_of(q);
+    auto& c = sdpadnnl::ctx(qq);
+    bool with_lse = lse.defined() && lse.numel() > 0;
+    auto& e = sdpadnnl::build(c, Q, L, Hq, Hk, D, causal, with_lse);
+    using dnnl::graph::tensor;
+    static std::vector<at::Tensor> sc(16), ni(16);
+    auto& st = sc.at(q.device().index());
+    if (!st.defined() || std::abs(st.item<float>() - (float)(1.0 / scale)) > 1e-3f) st = at::full({1}, (float)(1.0 / scale), q.options().dtype(at::kHalf));
+    auto& nt = ni.at(q.device().index());
+    if (!nt.defined()) nt = at::full({1}, -std::numeric_limits<float>::infinity(), q.options().dtype(at::kFloat));
+    int32_t lk = (int32_t)len_k, lq = (int32_t)len_q;
+    std::vector<tensor> ins{tensor(e.ins[0], c.eng, q.data_ptr()), tensor(e.ins[1], c.eng, k.data_ptr()),
+                            tensor(e.ins[2], c.eng, st.data_ptr())};
+    size_t vi = 3;
+    if (causal) {
+        ins.push_back(tensor::make_scalar_tensor(e.ins[3], &lk));
+        ins.push_back(tensor::make_scalar_tensor(e.ins[4], &lq));
+        ins.push_back(tensor(e.ins[5], c.eng, nt.data_ptr()));
+        vi = 6;
+    }
+    ins.push_back(tensor(e.ins[vi], c.eng, v.data_ptr()));
+    std::vector<tensor> outs{tensor(e.outs[0], c.eng, out.data_ptr())};
+    if (with_lse) outs.push_back(tensor(e.outs[1], c.eng, lse.data_ptr()));
+    dnnl::graph::sycl_interop::execute(e.cp, c.strm, ins, outs);
+}
+#endif
+
 // W8A8 prefill (opt-in): mul1 codebook values are bounded by 3.453125, one static int8 scale for every tensor
 static bool g_int8 = false;
 void exl3_set_int8(int64_t on) { g_int8 = on != 0; }
@@ -641,6 +773,12 @@ void exl3_set_vec_max_m(int64_t n) { g_vec_max_m = (int)n; }
 
 TORCH_LIBRARY(exl3xpu_C, m) {
     m.def("exl3_set_int8(int on) -> ()", &exl3_set_int8);
+#ifdef EXL3_DNNL
+    m.def("exl3_sdpa(Tensor q, Tensor k, Tensor v, Tensor(a!) out, Tensor(b!) lse, bool causal, float scale) -> ()");
+    m.impl("exl3_sdpa", torch::kXPU, &exl3_sdpa);
+    m.def("exl3_sdpa_len(Tensor q, Tensor k, Tensor v, Tensor(a!) out, Tensor(b!) lse, bool causal, float scale, int len_k, int len_q) -> ()");
+    m.impl("exl3_sdpa_len", torch::kXPU, &exl3_sdpa_len);
+#endif
     m.def("linear(Tensor x, Tensor trellis, Tensor suh, Tensor svh, Tensor shard_of_nb, int[] group_bounds, int K, int cb, int small_m_max, int slice_n) -> Tensor");
     m.impl("linear", torch::kXPU, &exl3_linear);
     m.def("exl3_gemm_small(Tensor x, Tensor trellis, Tensor suh, Tensor svh, Tensor shard_of_nb, Tensor(a!) out, int K, int cb) -> ()");

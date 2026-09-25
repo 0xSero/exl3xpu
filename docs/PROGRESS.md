@@ -506,3 +506,19 @@ One cold 32K prompt at 2,108 tok/s (15.5 s), XPU kernel time by stage:
 | GDN (gdn_attention + chunk kernels) | ~2.3 s | ~15% | |
 | norms / activations / copies | ~1.5 s | ~9% | |
 Linears are done; further prefill gains need attention (int8 QK^T, SageAttention-style) and GDN.
+
+### oneDNN Graph fused SDPA for fp8-KV prefill attention (2026-09-25), `EXL3_ONEDNN_ATTN=1`
+torch SDPA on XPU (oneDNN fused) ran 93-98 TF at head_dim 256 vs 76 for FA2, but returns no log-sum-exp, which the
+32K-block merge needs. oneDNN Graph built directly (`exl3_sdpa`): MatMul -> Divide -> bottom-right causal mask
+(GenIndex/Select) -> SoftMax -> MatMul. Findings on the way: `logical_tensor(id, dt, {1}, strided)` picks the
+rank overload (ndims=1, unknown dims) -> "invalid logical tensor"; asking SoftMax for stats (LSE) drops to the
+unfused `larger_partition_kernel` (materializes scores -> DEVICE_LOST at 3200x32K); without stats it runs the
+fused `sdp_primitive_v1` kernel. So: one fused call per KV head over the whole [0, seq_len) with the causal mask
+(no merge), K/V of that head dequantized head-major (<= 260 MB at 254K, less than the block path).
+Key padding is NOT allowed (the fused kernel takes causal alignment from dims: rel err 0.2-0.8); queries are
+padded to 256 at the top (exact). Each distinct seq_len compiles once (cached).
+- Kernel (per kv head, causal, vs FA2 one call): L=36K 90.5 vs 69.9 TF, 131K 81.2 vs 67.4, 254K 80.1 vs 65.3;
+  maxdiff <= 3.1e-5. tests/test_fp8kv_prefill.py PASS (rel <= 1.7e-4).
+- Served, B70 #1, int8 prefill on both, same build/day, cold (FA2 -> oneDNN): 4K 2198 -> **2421** (+10%),
+  32K 2104 -> **2259** (+7%), 128K 1234 -> **1415** (+15%), 254K 769 -> **911** (+18%).
+  vs the fp16 recipe of this morning (1654 / 1434 / 928 / 650): 1.46x / 1.58x / 1.52x / 1.40x.
