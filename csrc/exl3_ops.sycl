@@ -329,6 +329,55 @@ static void launch_reconstruct(const at::Tensor& tr, at::Tensor& w, int n0, sycl
     q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>(round_up(n, local), local), k); });
 }
 
+#ifdef EXL3_DNNL
+#include <oneapi/dnnl/dnnl.hpp>
+#include <oneapi/dnnl/dnnl_sycl.hpp>
+// y[:, cols] (fp16, row stride ldy) = (xq[M,K] @ wq[K,N]) * sw * sx[m]: int8 XMX GEMM with the dequant fused,
+// so the output Hadamard reads fp16 instead of int32. Primitives cached per (M, K, N, ldy).
+namespace q8dnnl {
+struct Ctx { dnnl::engine eng; dnnl::stream strm; };
+static Ctx& ctx(sycl::queue& q) {
+    static std::map<void*, Ctx> m;
+    void* key = (void*)&q;
+    auto it = m.find(key);
+    if (it == m.end()) {
+        auto eng = dnnl::sycl_interop::make_engine(q.get_device(), q.get_context());
+        it = m.emplace(key, Ctx{eng, dnnl::sycl_interop::make_stream(eng, q)}).first;
+    }
+    return it->second;
+}
+static void gemm(sycl::queue& q, const int8_t* xq, const int8_t* wq, const float* sw_dev, const float* sx, fp16* y,
+                   int64_t M, int64_t K, int64_t N, int64_t ldy) {
+    using namespace dnnl;
+    using dt = memory::data_type;
+    auto& c = ctx(q);
+    static std::map<std::tuple<int64_t, int64_t, int64_t, int64_t>, dnnl::matmul> cache;
+    auto key = std::make_tuple(M, K, N, ldy);
+    memory::desc a_md({M, K}, dt::s8, memory::dims{K, 1});
+    memory::desc b_md({K, N}, dt::s8, memory::dims{N, 1});
+    memory::desc c_md({M, N}, dt::f16, memory::dims{ldy, 1});
+    memory::desc sx_md({M, 1}, dt::f32, memory::dims{1, 1});
+    memory::desc sw_md({1}, dt::f32, memory::dims{1});
+    auto it = cache.find(key);
+    if (it == cache.end()) {
+        primitive_attr attr;
+        attr.set_scales_mask(DNNL_ARG_WEIGHTS, 0);
+        post_ops po;
+        po.append_binary(algorithm::binary_mul, sx_md);
+        attr.set_post_ops(po);
+        it = cache.emplace(key, dnnl::matmul(dnnl::matmul::primitive_desc(c.eng, a_md, b_md, c_md, attr))).first;
+    }
+    auto mk = [&](const memory::desc& md, const void* p) {
+        return sycl_interop::make_memory(md, c.eng, sycl_interop::memory_kind::usm, const_cast<void*>(p));
+    };
+    sycl_interop::execute(it->second, c.strm,
+                          {{DNNL_ARG_SRC, mk(a_md, xq)}, {DNNL_ARG_WEIGHTS, mk(b_md, wq)}, {DNNL_ARG_DST, mk(c_md, y)},
+                           {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, mk(sw_md, sw_dev)},
+                           {DNNL_ARG_ATTR_MULTIPLE_POST_OP(0) | DNNL_ARG_SRC_1, mk(sx_md, sx)}});
+}
+}  // namespace q8dnnl
+#endif
+
 // W8A8 prefill (opt-in): mul1 codebook values are bounded by 3.453125, one static int8 scale for every tensor
 static bool g_int8 = false;
 void exl3_set_int8(int64_t on) { g_int8 = on != 0; }
@@ -478,6 +527,22 @@ at::Tensor exl3_linear(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Ten
         int n_in = S * M, local = 8;
         auto run_in = [&](auto tag) {
             using TIn = decltype(tag);
+            int kb_n = (int)(k / 128);
+            auto wg = [&](auto kern, int tpr) {
+                q.submit([&](sycl::handler& h) { h.parallel_for(sycl::nd_range<1>((size_t)n_in * tpr, tpr), kern); });
+            };
+            if (kb_n <= 8 * 6) {
+                wg(HadInQ8WgKernel<TIn, 8, 6>{reinterpret_cast<const TIn*>(x2.data_ptr()), reinterpret_cast<const fp16*>(suh.data_ptr()),
+                                              reinterpret_cast<int8_t*>(xq.data_ptr()), sx.data_ptr<float>(), (int)M, (int)k, (int)S,
+                                              (int)x2.stride(0)}, 8);
+                return;
+            }
+            if (kb_n <= 16 * 9) {
+                wg(HadInQ8WgKernel<TIn, 16, 9>{reinterpret_cast<const TIn*>(x2.data_ptr()), reinterpret_cast<const fp16*>(suh.data_ptr()),
+                                               reinterpret_cast<int8_t*>(xq.data_ptr()), sx.data_ptr<float>(), (int)M, (int)k, (int)S,
+                                               (int)x2.stride(0)}, 16);
+                return;
+            }
             HadInQ8Kernel<TIn> kin{reinterpret_cast<const TIn*>(x2.data_ptr()), reinterpret_cast<const fp16*>(suh.data_ptr()),
                                    reinterpret_cast<int8_t*>(xq.data_ptr()), sx.data_ptr<float>(), (int)M, (int)k, (int)S,
                                    (int)x2.stride(0)};
@@ -487,6 +552,24 @@ at::Tensor exl3_linear(at::Tensor x, at::Tensor trellis, at::Tensor suh, at::Ten
         else if (x2.scalar_type() == at::kBFloat16) run_in(sycl::ext::oneapi::bfloat16{});
         else TORCH_CHECK(false, "x dtype");
         const float sw = kQ8WMax / 127.0f;
+#ifdef EXL3_DNNL
+        {
+            static std::vector<at::Tensor> swd(16);
+            auto& swt = swd.at(x.device().index());
+            if (!swt.defined()) swt = at::full({1}, sw, x.options().dtype(at::kFloat));
+            auto y = at::empty({M, n}, x.options().dtype(at::kHalf));
+            for (size_t g = 0; g + 1 < group_bounds.size(); ++g) {
+                int64_t g0 = group_bounds[g], g1 = group_bounds[g + 1], ng = g1 - g0;
+                auto w = at::empty({k, ng}, x.options().dtype(at::kChar));
+                if (K == 4) launch_reconstruct_q8<4>(trellis, w, g0, q); else launch_reconstruct_q8<6>(trellis, w, g0, q);
+                q8dnnl::gemm(q, reinterpret_cast<const int8_t*>(xq.data_ptr()) + g * M * k,
+                               reinterpret_cast<const int8_t*>(w.data_ptr()), swt.data_ptr<float>(),
+                               sx.data_ptr<float>() + g * M, reinterpret_cast<fp16*>(y.data_ptr()) + g0, M, k, ng, n);
+            }
+            exl3_had_out_h(y, svh, out);
+            return out.view(shape);
+        }
+#endif
         for (size_t g = 0; g + 1 < group_bounds.size(); ++g) {
             int64_t g0 = group_bounds[g], g1 = group_bounds[g + 1], ng = g1 - g0;
             auto w = at::empty({k, ng}, x.options().dtype(at::kChar));

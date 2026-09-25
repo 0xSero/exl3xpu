@@ -460,3 +460,16 @@ Hadamard (`HadOutQ8Kernel`). Decode (M <= 128) is unchanged and stays bit-exact.
   32K 1434 -> **1979** (1.38x), 128K 928 -> **1135** (1.22x); 4K cells were first-after-boot (JIT) for both, discarded.
 Not in the canonical recipe (quality trade is the user's call). Remaining overhead: had_out reads int32 (2x
 bytes), had_in has one thread per row; attention is untouched, so the 200K+ gain is smaller.
+
+### int8 prefill v2: oneDNN fused-scale GEMM + work-group had_in (2026-09-25)
+- oneDNN 3.9 (oneAPI, SYCL interop) s8xs8 matmul with the static weight scale as a weights scale and the
+  per-row activation scale as a binary-mul post-op, fp16 dst written straight into the fused-shard output;
+  output Hadamard then reads fp16 instead of int32. Built when /opt/intel/oneapi/dnnl is present (EXL3_DNNL).
+- `HadInQ8WgKernel`: 8 (K<=6144) or 16 (K=17408) threads per row, blocks kept in registers, row max via SLM,
+  one pass. qkvz had_in 0.47 -> 0.31 ms/call.
+- `tests/test_int8_prefill.py` M=4096: all linears fp16 1762 -> int8 **966 ms (1.82x)**; vs torch reference of the
+  same quantization worst 3.2e-4 (PASS). qkvz per call: GEMM 2.78 ms (~247 TOPS, at the measured int8 ceiling),
+  had_out 0.55 (fp16, bandwidth-bound), had_in 0.31, reconstruct 0.21.
+- Served run not completed: at 06:45 B70 #1's root port c0:01.1 began a flood of corrected AER errors (Data Link
+  Layer replay Timeout; 31k Hardware Error lines by 09:20, 483 from c0:01.1) and the engine stalled mid 4K
+  prefill at 06:52 with no log for 2.5 h. Link still trains Gen4 x16; errors are on the physical link (riser/slot).

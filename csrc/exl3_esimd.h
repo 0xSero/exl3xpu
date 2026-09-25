@@ -372,6 +372,53 @@ struct HadInQ8Kernel {
     }
 };
 
+// Same result as HadInQ8Kernel, one work-group of TPR threads per (g, m): each thread transforms up to NB
+// 128-blocks into registers, the row max is reduced through SLM, then each thread quantizes its own blocks.
+template <typename TIn, int TPR, int NB>
+struct HadInQ8WgKernel {
+    const TIn* x; const fp16* suh; int8_t* xq; float* sx;
+    int M, Kdim, S, x_stride;
+    void operator()(sycl::nd_item<1> it) const SYCL_ESIMD_KERNEL {
+        slm_init<TPR * sizeof(float)>();
+        int t = it.get_local_id(0);
+        int row = it.get_group(0);
+        int m = row % M, g = row / M;
+        int kb_n = Kdim / 128;
+        simd<fp16, 128 * NB> buf;
+        simd<float, 128> mx = 0.0f;
+#pragma unroll
+        for (int j = 0; j < NB; ++j) {
+            int kb = t + j * TPR;
+            if (kb < kb_n) {
+                simd<TIn, 128> xi = block_load<TIn, 128>(x + (size_t)m * x_stride + kb * 128);
+                simd<fp16, 128> su = block_load<fp16, 128>(suh + (size_t)g * Kdim + kb * 128);
+                simd<float, 128> v = convert<float>(xi) * convert<float>(su);
+                v = convert<float>(convert<fp16>(v));
+                fwht128(v);
+                v *= kRsqrt128;
+                simd<fp16, 128> vh = convert<fp16>(v);
+                buf.template select<128, 1>(j * 128) = vh;
+                mx = max(mx, abs(convert<float>(vh)));
+            }
+        }
+        slm_scalar_store<float>(t * sizeof(float), hmax<float>(mx));
+        barrier();
+        float amax = hmax<float>(slm_block_load<float, TPR>(0));
+        float sc = amax > 0.0f ? amax / 127.0f : 1.0f;
+        float inv = 1.0f / sc;
+        if (t == 0) sx[(size_t)g * M + m] = sc;
+#pragma unroll
+        for (int j = 0; j < NB; ++j) {
+            int kb = t + j * TPR;
+            if (kb < kb_n) {
+                simd<fp16, 128> b = buf.template select<128, 1>(j * 128);
+                simd<float, 128> r = rnde<float>(convert<float>(b) * inv);
+                block_store<int8_t, 128>(xq + ((size_t)g * M + m) * Kdim + kb * 128, convert<int8_t>(r));
+            }
+        }
+    }
+};
+
 // out[m, nb*128:+128] = svh * H(y_i32[m, :] * sx[m] * sw) / sqrt(128), for one fused group's columns
 template <typename TOut>
 struct HadOutQ8Kernel {
