@@ -522,3 +522,4 @@ padded to 256 at the top (exact). Each distinct seq_len compiles once (cached).
 - Served, B70 #1, int8 prefill on both, same build/day, cold (FA2 -> oneDNN): 4K 2198 -> **2421** (+10%),
   32K 2104 -> **2259** (+7%), 128K 1234 -> **1415** (+15%), 254K 769 -> **911** (+18%).
   vs the fp16 recipe of this morning (1654 / 1434 / 928 / 650): 1.46x / 1.58x / 1.52x / 1.40x.
+- Needle with oneDNN attention + int8 prefill: 3/3 at 131K, 3/3 at 240K. Promoted to model.yaml (EXL3_ONEDNN_ATTN=1).
