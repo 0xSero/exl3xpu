@@ -292,6 +292,28 @@ async def spec_counters(base):
     return (acc, drafts) if acc is not None and drafts is not None else None
 
 
+def sgl_log_accept(t0: float, t1: float):
+    """SGLang live acceptance over [t0, t1): token-weighted mean of the server log's per-interval `accept len`
+    (log timestamps are UTC). SGL_SERVER_LOG=<path> enables it; None if absent."""
+    path = os.environ.get("SGL_SERVER_LOG")
+    if not path or not os.path.exists(path):
+        return None
+    import datetime, re
+    rx = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] Decode batch.*?accept len: ([\d.]+).*?gen throughput \(token/s\): ([\d.]+)")
+    tok = steps = 0.0
+    with open(path, errors="ignore") as f:
+        for line in f:
+            m = rx.match(line)
+            if not m:
+                continue
+            ts = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
+            if t0 <= ts < t1:
+                a, g = float(m.group(2)), float(m.group(3))
+                if a > 0 and g > 0:
+                    tok += g; steps += g / a
+    return round(tok / steps, 3) if steps else None
+
+
 async def decode_cell(args, C, ctx, cls):
     url = f"{args.base}/v1/chat/completions"
     # deterministic prompt sequence per cell (same text across variants/boots, still cold: server restarts)
@@ -344,6 +366,9 @@ async def decode_cell(args, C, ctx, cls):
     accept_len = None
     if m0 and m1 and m1[1] > m0[1]:
         accept_len = round(1 + (m1[0] - m0[0]) / (m1[1] - m0[1]), 3)
+    live = sgl_log_accept(w0, w1)
+    if live is not None:
+        accept_len = live          # SGLang: counters only move at request end; the log is live
     flags = []
     if fails:
         flags.append("REQ_FAIL")

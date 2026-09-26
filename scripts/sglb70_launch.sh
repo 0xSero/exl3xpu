@@ -9,7 +9,7 @@ have=$(docker exec sglb70-dev ls /dev/dri 2>/dev/null | grep renderD)
 if [ "$want" != "$have" ]; then
   echo "card node changed ($have -> $want): recreating sglb70-dev"
   docker rm -f sglb70-dev >/dev/null 2>&1; bash ~/sglb70/exl3xpu/scripts/sglb70_container.sh >/dev/null
-  docker exec sglb70-dev bash -c "cd /w/exl3xpu && pip install --no-deps --no-build-isolation -e . >/dev/null 2>&1"
+  docker exec sglb70-dev bash -c "cd /w/exl3xpu && pip install --no-deps --no-build-isolation -e . >/dev/null 2>&1; pip install -q --no-deps onednn-devel==2026.0.0 onednn==2026.0.0 >/dev/null 2>&1"
 fi
 # the server runs inside the container: killing the tmux client does not stop it
 docker exec sglb70-dev bash -c 'pkill -f "[s]glang.launch_server" ; for i in $(seq 90); do pgrep -f "[s]glang.launch_server" >/dev/null || exit 0; sleep 1; done; pkill -9 -f "[s]glang"' 2>/dev/null

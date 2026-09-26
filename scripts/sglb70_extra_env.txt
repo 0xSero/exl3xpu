@@ -1,0 +1,1 @@
+EXL3_LIB=/w/exl3xpu/exl3xpu/_C_dnnl.so EXL3_INT8_PREFILL=1 EXL3_ONEDNN_ATTN=1

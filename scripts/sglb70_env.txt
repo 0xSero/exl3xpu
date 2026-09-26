@@ -1,0 +1,1 @@
+EXL3_DRAFT_VOCAB=/w/exl3xpu/models/qwen3.8-27b-exl3-4.00bpw/draft_vocab.json TORCHINDUCTOR_COMPILE_THREADS=1 EXL3_SGL_GDN_FOLD=1 PYTORCH_ALLOC_CONF=expandable_segments:True

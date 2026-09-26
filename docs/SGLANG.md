@@ -190,3 +190,50 @@ Current config (sg14): base args (`scripts/sglb70_base_args.txt`: 262,144 ctx, m
 no radix cache, 8 running, graphs 1-8, NEXTN 3/1/4, fp8 KV, bf16, metrics, max-prefill 4096)
 + `--enable-linear-replayssm-spec`; env EXL3_DRAFT_VOCAB, TORCHINDUCTOR_COMPILE_THREADS=1, EXL3_SGL_GDN_FOLD=1,
 PYTORCH_ALLOC_CONF=expandable_segments:True. Prefill (ladder, cold): 8K 1,476, 32K 1,262, 128K 756 tok/s.
+
+### Prefill levers (paired, cold ladder prompts, 84:00.0)
+| step | 4K | 32K | 128K | kept |
+|---|---|---|---|---|
+| sg14 (fold + expandable segments), fp16 prefill, sgl fp8 FA | 1,450-1,466 | 1,244-1,262 | 751-756 | base |
+| + int8 prefill (`_C_dnnl.so` built against pip onednn-devel 2026.0.0, `EXL3_INT8_PREFILL=1`; kernel test 1.92x, worst 3.0e-4 vs torch ref) | 2,355 | 1,802 | 926 | yes |
+| + oneDNN fused SDPA for long single-sequence fp8 prefill chunks (`EXL3_ONEDNN_ATTN=1`, `_patch_xpu_attn_routes`) | 2,342 | 1,970 | **1,404** | yes |
+| + `--linear-attn-prefill-backend intel_xpu` (sgl_kernel fused GDN for plain extends) | 2,352 | **2,119** | 1,405 | yes (one sample) |
+vLLM same card/day: 2,461 / 2,227 / 1,359. Ladder OK at every step, greedy output unchanged.
+
+### GDN fold costs decode (A/B, same boot flags otherwise, C1/C4 prose thinking on, live log acceptance)
+snapshot: C1 58.3 tok/s per stream @2.59 (44 ms/step), C4 44.5 @2.55 (57 ms/step); fold: C1 55.5 @2.98 (54 ms/step),
+C4 32.2 @2.50 (78 ms/step). The fold commit (`gdn_replayssm_exact_fold_kernel`, num_warps=1) adds ~10-20 ms per step
+on XPU. **Rejected as default** (speed); kept opt-in for the full-context-streams cell (KV 336-341K vs 257K).
+Note: both arms ran after two PCIe drops and read ~15 % below this morning's sg4 at C1; cross-boot comparisons on
+this card are no longer trustworthy.
+
+### B70 #0 (84:00.0, slot 17) is not stable either: stopped
+Slot 17 dropped off the bus at 12:01:18 (2 min into the sg17 panel) and 12:36:07 (sg18 panel, ~14 min of load),
+after one drop yesterday (02:01, together with slot 19). Each re-enumerates the card (renderD135 -> 132 -> 134);
+the 12:01 drop coincided with 71 RxErr lines on the RTX 3090 at c5:00.0 (another agent's card). Idle: no errors.
+Panels sg17/sg18 are invalid past the drop points. GPU work stopped here.
+
+### Live engine restore (2026-09-26 ~13:10 box time)
+`docker start` of the original engine container failed: its device `/dev/dri/renderD135` no longer exists after the
+drops. Restored through the plugin's own recovery path instead: `omarchy-local-ai stop` + `omarchy-local-ai run
+qwen38-27b-exl3-4bpw-arcb70-vllm-exl3xpu-tp1 intel-xpu:0` (same recipe, same image
+ghcr.io/0xsero/exl3xpu@sha256:86276b00, fresh by-path link). Controller state ready at 11:10:50 UTC; engine maps
+renderD134 = 84:00.0; gateway `/v1/models` 200 and a chat request ("17*3" -> "51") through 127.0.0.1:12434;
+deployment config keeps agent claude, folder ~/Work/la-typed-test. The original container record is in
+`omarchy:~/sglb70/live-engine-inspect.json`.
+
+### Replay redirect (Sero: "focus just on replaying real session JSONL") - prepared, not run
+- Corpus: `~/tuning-kit/omp_replay_corpus.jsonl` (40 omp sessions) was NOT clean: redacted into
+  `omarchy:~/sglb70/replay/omp_replay_corpus.redacted.jsonl` (`redact_corpus.py`, counts only: 1 Anthropic key,
+  14 OpenAI-style keys, 1 AWS key id, 1 private key block, 13 bearer tokens, 109 password/token assignments;
+  rescan 0 matches). The unredacted file never left the Mac.
+- 262K filter (`bench/filter_replay_corpus.py`, chat template + tools, 16K output reserve, 12 turns): 40 kept,
+  0 dropped; largest request 164,142 tokens (p50 25,420). -> `omp_replay_corpus.redacted.filtered.jsonl`.
+- Harness `bench/replay_bench.py` (kit's cell_replay: same seed, tools, thinking on, t=1/top-p 0.95, no max_tokens):
+  per-stream p50/p5, decode aggregate, output tok/s, TTFT p50/p95 split cached-prefix vs first turn, new-token
+  prefill tok/s, turns/min, acceptance (vLLM /metrics or SGLang log), LOOP/REQ_FAIL/KV_FULL/TOOL_JSON, session wall
+  time; ledger `omarchy:~/sglb70/ledger.jsonl`. Needs `--enable-prompt-tokens-details` (vLLM) / `--enable-cache-report`
+  (SGLang) for server-reported cached tokens, else it estimates from the previous turn.
+- Known SGLang gap for replay: prefix caching is OFF on the current config. `intel_xpu` attention needs page 64/128;
+  `no_buffer` mamba radix needs page 1; `extra_buffer` is refused on XPU by `supports_mamba_cache_extra_buffer`
+  (hard-coded False for XPU). First step on a stable card: lift that gate (as done for the fold) and validate.
