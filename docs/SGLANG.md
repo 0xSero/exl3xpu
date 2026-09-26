@@ -77,3 +77,64 @@ registered through the `sglang.srt.plugins` entry point (`exl3xpu/sglang_plugin.
 - Memory is the binding constraint: weights 15.9 GB + mamba (state + spec snapshots) 0.38 GB/stream + fp8 KV
   32 KB/token + ~4 GB activations. 16 streams cannot coexist with a 262K pool. **8 streams, mem 0.86: KV pool
   257,536 fp8 tokens**, ladder 8K/32K OK (s8a). This is the baseline config for the gate panel.
+- Gate panel on s8a (tmux `sglb70-panel`, real corpus, t=0.7/top-p 0.95, no output cap): C1 prose thinking on
+  **55.6 tok/s per stream** (58.8 agg; 1 sample, the request outlived the 45 s window; MTP accept len median 2.50 over
+  the boot), GPU 100 % busy. 02:45:00: **8th link drop** (Slot 19) 90 s into the C2 cell; the engine aborted
+  (drm_neo.cpp:284); every later cell is REQ_FAIL (not a measurement). Card re-enumerated as renderD133.
+
+### Stop: B70 #1 cannot carry sustained load, and its faults reach other devices
+Kernel log correlation (journalctl -k), per drop window: 01:57 -> RxErr bursts on the RTX 3090 at c5:00.0
+(34 lines, same root complex pci0000:c0); **02:01:23 -> B70 #0 (slot 17, 80:03.1) lost its link in the same second
+as B70 #1** (the other agent's TB 2.1 eval engine on B70 #0 segfaulted and the user's live engine was recreated,
+per its PROGRESS entry); 02:45 -> 92 RxErr lines on the 3090 at c5:00.0 plus c0:03.1. Idle: 0 errors in 90 s.
+Under load the corrected-error rate on c0:01.1 climbs, then the link drops within 1.5-5 min (earlier this week it
+took 20-25 min). Continuing would put the user's live service on B70 #0 and the 3090 campaign at risk, so GPU work
+on c3:00.0 is halted. Needs a hardware/BIOS decision by the owner (reseat or replace the slot-19 riser, force
+PCIe Gen3/Gen4 on the port, `pcie_aspm=off`, check the PSU rail both B70s share). No root here, so none of that
+was attempted.
+
+### Panel as measured (one B70, Qwen3.8-27B EXL3 4.00bpw, MTP k=3 + pruned draft head)
+| cell | SGLang 0.5.20 + exl3xpu (this campaign) | vLLM 0.26.1 exl3xpu (image 21412bdd) |
+|---|---|---|
+| C1 prose, thinking on (real corpus, t=0.7) | **55.6** per stream (1 sample, s8a: bf16, fp8 KV, 262K ctx, 8 seqs) | 91.2 agg (accept 3.42) |
+| C1 code, thinking on (real, t=0.7) | not measured (link drop) | 66.1 |
+| C1 prose / code, thinking off (synthetic greedy) | **55.1 / 76.9** (mtp4: fp16, fp16 KV, 32K ctx, 4 seqs) | 56.6 / 79.2 (09-23 build) |
+| C2 / C8 / C16 aggregate | not measured (link drop during C2) | 151.4 / 357.1 / 365.2 (prose, thinking on) |
+| cold prefill 4K / 32K / 128K | ~1.2K (4K ladder rung) / **1,262-1,265** / not measured; 8K 1,394-1,473, 16K 1,419 | 2,421 / 2,259 / 1,415 (int8 prefill + oneDNN attention); fp16-prefill recipe 1,654 / 1,434 / 928 |
+| max context / KV pool | 262,144 / 257,536 fp8 tokens at 8 seqs | 262,144 / 272,570 at 16 seqs |
+Reading: at C1 SGLang is at parity with vLLM on the synthetic greedy thinking-off panel (97 %) but ~40 % behind on
+the realistic thinking-on cell: per verify step 45 ms vs vLLM's 37.5 ms, and acceptance 2.5 vs 3.4 (not yet
+explained: sampling path vs vLLM's rejection sampler, or the corpus sample; one sample only). Prefill without int8
+is ~12 % below vLLM's fp16-prefill recipe at 32K and ~44 % below the current int8 + oneDNN recipe. SGLang holds half
+the streams at the full context: the GDN state + per-draft snapshots cost 0.38 GB/stream and ReplaySSM (the fix)
+does not compile on Intel Triton.
+
+### Gate status (inference-tuning-protocol)
+| gate | status |
+|---|---|
+| 1 correctness | served id, completions, thinking on/off, greedy identity MTP vs no-MTP: pass. Tool call, vision: **not run**. Coherence ladder: 1K/4K/8K/16K/32K OK; 128K/256K **not run** |
+| 2 speed floor | C1 prose 55.6 >= 20: pass; >= 90 % of the vLLM recipe (91.2): **fail** (61 %) |
+| 3 sustained (3x30 s cells, 10 min soak) | **not possible on this card** (link drops within minutes) |
+| 4 context proof 32K | pass (32,688-token needle OK, TTFT 25.9 s); 128K not run |
+| 5 headroom | 4.1 GB free after graphs at mem 0.86 (static 27.4 GB of 31.9) |
+| 6 speculative tried | MTP k=3 on, kept (+7.5 % from the pruned head); draft-length sweep not run |
+| 7 concurrency computed | 257,536 / 262,144 = 0.98 full-context streams; max_running_requests 8 |
+Status: **candidate, tuned: baseline-partial**. No registry recipe was written: there is no published SGLang-XPU
+image to pin and no panel to attach; a recipe from two cells would be the one-wave "validated" the protocol forbids.
+
+### Next steps (on a stable B70)
+1. Re-run `scripts/sglb70_panel.sh` on the s8a config (C1-C16 thinking on/off, prefill 4K/32K/128K), tool + vision
+   checks, ladder to 256K, 10-min soak at C8.
+2. int8 prefill: `_C_dnnl.so` (pip onednn-devel 2026.0.0, EXL3_DNNL_DIR) is built but untested; serve with
+   `EXL3_LIB=/w/exl3xpu/exl3xpu/_C_dnnl.so EXL3_INT8_PREFILL=1` (vLLM measured +38 % at 32K from it).
+3. Explain the acceptance gap (2.5 vs 3.4) with an A/B of `EXL3_SGL_SPEC_SAMPLE` at t=0 vs t=0.7 on the same prompts.
+4. Knob ladder: draft length 2/3/4, chunked prefill 2048/4096/8192, mem fraction 0.86 -> 0.90 with chunk 2048,
+   max-running 8 vs 12 at 196K context; triton attention backend + radix cache (prefix caching is off with intel_xpu).
+5. Upstream: the five SGLang-XPU bugs fixed in the plugin (spec sampling greedy-only, stale XPU GDN wrapper,
+   CUDA-only mamba scatter guards, fp8 descale in forward_extend, fp8 q cast in forward_decode) are worth issues/PRs.
+
+### Box state at stop (2026-09-26 ~03:00 box clock)
+Container `sglb70-dev` (lmsysorg/sglang:v0.5.20-xpu, `sleep infinity`, maps only renderD133/card6 = c3:00.0,
+pristine venv + exl3xpu editable + onednn 2026.0.0 --no-deps); no SGLang server, no benchmark, no `sglb70-*` tmux
+session. Work dir `~/sglb70/` (exl3xpu copy, runs/, logs/, byp/). Image `lmsysorg/sglang:v0.5.20-xpu` pulled.
+Nothing else on the box was touched.
