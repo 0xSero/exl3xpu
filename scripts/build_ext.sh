@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 T=$(python3 -c "import torch,os;print(os.path.dirname(torch.__file__))")
 # oneDNN (oneAPI) for the fused-scale int8 prefill GEMM, when present
-D=/opt/intel/oneapi/dnnl/latest
+D=${EXL3_DNNL_DIR:-/opt/intel/oneapi/dnnl/latest}   # pip onednn-devel: EXL3_DNNL_DIR=$(python3 -c "import sys;print(sys.prefix)")
 DNNL_FLAGS=""; DNNL_LIBS=""
 if [ -f $D/include/oneapi/dnnl/dnnl_sycl.hpp ] && [ -z "${EXL3_NO_DNNL:-}" ]; then
   DNNL_FLAGS="-DEXL3_DNNL -I$D/include"; DNNL_LIBS="-L$D/lib -Wl,-rpath,$D/lib -ldnnl"
