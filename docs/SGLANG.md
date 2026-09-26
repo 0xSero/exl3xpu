@@ -52,3 +52,28 @@ registered through the `sglang.srt.plugins` entry point (`exl3xpu/sglang_plugin.
 - **mtp3**: greedy output identical to the no-draft boot (same reasoning text, "11:15"). Synthetic panel, greedy,
   thinking off, no output cap, fp16 KV, 32K ctx, no prefix cache: **C1 prose 51.2, code 74.3 tok/s** per stream
   (accept len ~3.5-3.9 of 4 on code). vLLM exl3xpu, same synthetic panel: 56.6 / 79.2 (with its pruned draft head).
+- Shared checkout collision: another agent committing in `~/intek-arc-b70` put its PROGRESS commit (8b49ebc,
+  which also swept in this campaign's uncommitted sweep.py/pyproject.toml edits) on this branch. main was
+  fast-forwarded to 8b49ebc (its only parent was main); this campaign continues in the worktree
+  `~/intek-arc-b70-sglang` (branch `sglang-xpu`). Per that commit, B70 #0 (slot 17) also dropped at ~02:01.
+- Pruned MTP draft head for SGLang (`_DraftHead` via `set_lm_head_from_target`, 512 of 1940 vocab blocks):
+  C1 prose 51.2 -> **55.1** (+7.5 %), code 74.3 -> 76.9 (+3.5 %), greedy output unchanged. **Kept.**
+- fp8 KV on the `intel_xpu` backend was half-wired in SGLang 0.5.20: (1) attention layers get no k/v scales
+  unless the quant config provides a KV-cache method -> EXL3 config now returns `BaseKVCacheMethod` (scale 1.0, as
+  vLLM's default fp8); (2) `forward_extend` (prefill chunks + speculative verify) hard-codes `k_descale=None` ->
+  wired like decode; (3) `forward_decode` casts q to fp8, which the XPU kernel rejects -> q stays in the model
+  dtype; (4) the fp8 prefill kernel needs a bf16 query -> the model runs `--dtype bfloat16` (EXL3 kernels take
+  bf16 in/out; decode weights still bit-exact). Standalone kernel check (`tests/test_sgl_fa_fp8.py`): fp8 paged
+  prefill with prefix correct (rel err <= 0.4 %), 4096 x 32K in 71 ms.
+- GDN state: `--mamba-ssm-dtype float32` (config default) costs 2.4 GB state + 9.6 GB speculative intermediate
+  states for 16 streams; float16 (what vLLM stores) halves it; output unchanged on the probe. XPU GDN verify
+  wrapper now fixed in place (BV=16 kept) instead of routing to the generic BV=32 wrapper.
+- "UR_RESULT_ERROR_OUT_OF_RESOURCES" during 4K-token prefill chunks at mem-fraction 0.88 (3.6 GB left) was
+  device memory exhaustion, not the link: 0.80 passes the ladder 8K/16K/32K (1473 / 1419 / 1262 tok/s cold).
+  Launcher bug found on the way: `pkill -f sglang.launch_server` inside `bash -c` matched itself (fixed).
+- `--enable-linear-replayssm-spec` (drops the 4.8 GB per-draft state snapshots; KV pool would be 301K tokens at
+  16 streams): **rejected** - its verify kernel fails in Intel Triton (tl.dot N>=16; padded to 16, then
+  `TritonIntelGPURemoveLayoutConversions` pass failure with warps 1/4, tf32/ieee).
+- Memory is the binding constraint: weights 15.9 GB + mamba (state + spec snapshots) 0.38 GB/stream + fp8 KV
+  32 KB/token + ~4 GB activations. 16 streams cannot coexist with a 262K pool. **8 streams, mem 0.86: KV pool
+  257,536 fp8 tokens**, ladder 8K/32K OK (s8a). This is the baseline config for the gate panel.

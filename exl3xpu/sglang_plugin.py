@@ -171,6 +171,14 @@ def _build_classes():
             from sglang.srt.layers.linear import LinearBase
             from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
             from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
+            try:
+                from sglang.srt.layers.radix_attention import RadixAttention
+                if isinstance(layer, RadixAttention):
+                    # k_scale/v_scale = 1.0 (no calibrated scales in EXL3 checkpoints): what fp8 KV needs on XPU
+                    from sglang.srt.layers.quantization.kv_cache import BaseKVCacheMethod
+                    return BaseKVCacheMethod(self)
+            except ImportError:  # pragma: no cover
+                pass
             parts = prefix.split(".")
             if "visual" in parts or "vision_tower" in parts:
                 return UnquantizedLinearMethod() if isinstance(layer, LinearBase) else None
@@ -382,7 +390,44 @@ def _patch_mtp() -> None:
             fc.process_weights_after_loading()
         return out
 
+    orig_set_head = getattr(cls, "set_lm_head_from_target", None)
+
+    def set_lm_head_from_target(self, target_lm_head):
+        if orig_set_head is not None:
+            orig_set_head(self, target_lm_head)
+        if getattr(target_lm_head, "exl3_draft", None) is not None:
+            self.lm_head = _DraftHead(target_lm_head)
+            logger.info("exl3xpu: MTP draft proposes from the pruned head (%d vocab blocks)",
+                        target_lm_head.exl3_draft["bounds"][1] // 128)
+
     cls.__init__, cls.load_weights, cls._exl3_patched = __init__, load_weights, True
+    cls.set_lm_head_from_target = set_lm_head_from_target
+
+
+class _DraftHeadMethod:
+    """quant_method of the pruned draft head: EXL3 GEMM over the kept 128-token blocks only, scattered into a
+    full-vocab -inf row (the draft's top-1 can only be a kept token; the target verifies with the full head)."""
+
+    def apply(self, layer, x, bias=None):
+        from . import ops
+        t = layer.target
+        d = t.exl3_draft
+        sub = torch.ops.exl3xpu_C.linear(x, d["trellis"], t.exl3_suh, d["svh"], d["shard"], d["bounds"],
+                                         t.exl3_K, t.exl3_cb, ops.SMALL_M_MAX, ops.RECON_SLICE_N)
+        out = x.new_full((x.shape[0], t.exl3_svh.shape[0]), float("-inf"))
+        out.index_copy_(1, d["idx"], sub)
+        return out
+
+
+class _DraftHead(torch.nn.Module):
+    def __init__(self, target):
+        super().__init__()
+        object.__setattr__(self, "target", target)      # not a submodule: no double registration / state_dict
+        self.weight = target.weight                     # zero-width placeholder (logits code reads .weight)
+        self.quant_method = _DraftHeadMethod()
+        for a in ("org_vocab_size", "num_embeddings", "num_embeddings_padded", "vocab_size"):
+            if hasattr(target, a):
+                setattr(self, a, getattr(target, a))
 
 
 def _sample_rows(logits: torch.Tensor, temps: torch.Tensor, top_ks: torch.Tensor | None,
@@ -441,22 +486,77 @@ def _patch_xpu_spec_sampling() -> None:
 def _patch_xpu_gdn_verify() -> None:
     """SGLang 0.5.20's XPU copy of the fused sigmoid-gating delta-rule wrapper
     (hardware_backend/xpu/kernels/fla) is stale against the shared Triton kernel: it omits `stride_h0_source`
-    (TypeError on the first MTP verify step) and the per-request pitch of the intermediate-state buffer. The generic
-    wrapper in sglang.kernels.ops already launches the non-CUDA grid, so route the Triton GDN kernel class to it.
-    EXL3_SGL_GDN_FIX=0 disables."""
-    if os.environ.get("EXL3_SGL_GDN_FIX", "1") != "1":
+    (TypeError on the first MTP verify step) and passes the runtime draft count instead of the per-request pitch of
+    the intermediate-state buffer. Re-define the XPU wrapper with both fixed and its XPU launch shape kept (BV=16,
+    fewer registers than the generic wrapper's BV=32). EXL3_SGL_GDN_FIX=0 disables; =generic uses the generic wrapper."""
+    mode = os.environ.get("EXL3_SGL_GDN_FIX", "1")
+    if mode == "0":
         return
     try:
         if not torch.xpu.is_available():
             return
+        import inspect
+        import textwrap
         from sglang.srt.layers.attention.linear.kernels import gdn_triton
-        from sglang.kernels.ops.attention.fla.fused_sigmoid_gating_recurrent import (
-            fused_sigmoid_gating_delta_rule_update as generic)
+        if mode == "generic":
+            from sglang.kernels.ops.attention.fla.fused_sigmoid_gating_recurrent import (
+                fused_sigmoid_gating_delta_rule_update as generic)
+            gdn_triton.fused_sigmoid_gating_delta_rule_update = generic
+            return
+        from sglang.srt.hardware_backend.xpu.kernels.fla import fused_sigmoid_gating_recurrent as xm
+        src = textwrap.dedent(inspect.getsource(xm.fused_sigmoid_gating_delta_rule_update))
+        a1 = "h0_indices=initial_state_indices,"
+        a2 = "cache_steps=0 if cache_steps is None else cache_steps,"
+        if a1 not in src or a2 not in src or "stride_h0_source" in src:
+            logger.warning("exl3xpu: XPU GDN wrapper layout changed; GDN verify fix not applied")
+            return
+        line1 = next(l for l in src.splitlines() if l.strip() == a1)
+        ind = line1[: len(line1) - len(line1.lstrip())]
+        src = src.replace(line1, line1 + "\n" + ind +
+                          "stride_h0_source=(initial_state_source.stride(0) if initial_state_source is not None else 0),", 1)
+        src = src.replace(a2, "cache_steps=(intermediate_states_buffer.stride(0) // (HV * K * V) "
+                              "if intermediate_states_buffer is not None else (cache_steps or 0)),", 1)
+        ns: dict = {}
+        exec(compile(src, "<exl3xpu:xpu fused_sigmoid_gating_delta_rule_update>", "exec"), xm.__dict__, ns)
+        fn = ns["fused_sigmoid_gating_delta_rule_update"]
+        xm.fused_sigmoid_gating_delta_rule_update = fn
+        gdn_triton.fused_sigmoid_gating_delta_rule_update = fn
+        logger.info("exl3xpu: XPU GDN verify wrapper fixed (stride_h0_source, per-request pitch)")
     except Exception as e:  # pragma: no cover
         logger.warning("exl3xpu: GDN verify fix not installed (%s)", e)
+
+
+def _patch_xpu_replayssm() -> None:
+    """--enable-linear-replayssm-spec (replaces the per-draft full-state snapshots, 4.8 GB for 16 streams on the 27B,
+    with a raw-input window): its verify kernel does tl.dot over a [BS, K] x [K, BS] tile with BS = next_pow2(draft
+    tokens) = 4, and XPU Triton requires dot dims >= 16. Pad the spec tile to 16 (rows beyond the draft are masked).
+    EXL3_SGL_RSSM_FIX=0 disables."""
+    if os.environ.get("EXL3_SGL_RSSM_FIX", "1") != "1":
         return
-    gdn_triton.fused_sigmoid_gating_delta_rule_update = generic
-    logger.info("exl3xpu: XPU GDN verify routed to the generic fused_sigmoid_gating_delta_rule_update wrapper")
+    try:
+        if not torch.xpu.is_available():
+            return
+        from sglang.kernels.ops.attention.fla import gdn_replayssm_spec_decode as g
+    except Exception as e:  # pragma: no cover
+        logger.warning("exl3xpu: ReplaySSM XPU fix not installed (%s)", e)
+        return
+    orig = getattr(g, "_launch_gdn_spec", None)
+    if orig is None or getattr(orig, "_exl3", False):
+        return
+    import inspect
+    sig = inspect.signature(orig)
+    warps = int(os.environ.get("EXL3_RSSM_WARPS", "4"))
+    dotp = os.environ.get("EXL3_RSSM_DOT", "ieee")
+
+    def _launch_gdn_spec(*args, **kw):
+        ba = sig.bind(*args, **kw)
+        ba.arguments["bs_min"] = max(16, ba.arguments.get("bs_min") or 0)
+        ba.arguments["num_warps"] = warps
+        ba.arguments["dot_precision"] = dotp
+        return orig(*ba.args, **ba.kwargs)
+
+    _launch_gdn_spec._exl3 = True
+    g._launch_gdn_spec = _launch_gdn_spec
 
 
 def _allow_xpu_in(module, names: list[str]) -> list[str]:
@@ -496,6 +596,69 @@ def _patch_xpu_mamba_scatter() -> None:
         logger.warning("exl3xpu: mamba scatter XPU fix not installed (%s)", e)
 
 
+_FP8_EXTEND = [
+    "k_descale, v_descale = None, None",
+    'if self.kv_cache_dtype_str != "auto" and layer.head_dim <= 256 and layer.k_scale is not None:  # exl3xpu',
+    "    _ds = (forward_batch.batch_size, layer.tp_k_head_num)",
+    "    k_descale = layer.k_scale.expand(_ds)",
+    "    v_descale = layer.v_scale.expand(_ds)",
+    "    if __EXL3_FP8_Q__:",
+    "        q = q.to(self.kv_cache_dtype)",
+    "        q_rope = q_rope.to(self.kv_cache_dtype) if q_rope is not None else None",
+    "        k_rope = k_rope.to(self.kv_cache_dtype) if k_rope is not None else None",
+    'if self.kv_cache_dtype_str != "auto" and k_descale is None:',
+    '    raise RuntimeError(f"exl3xpu fp8 extend: layer {layer.layer_id} {type(layer).__name__} qm={type(layer.quant_method).__name__} k_scale={layer.k_scale!r} head_dim={layer.head_dim}")',
+]
+
+
+def _patch_xpu_fp8_extend() -> None:
+    """intel_xpu attention: fp8 KV descale is wired for decode only; forward_extend (prefill chunks and the
+    speculative target-verify) passes k_descale=None to a kernel that requires it with an fp8 cache. Wire it the
+    same way as forward_decode. EXL3_SGL_FP8_Q=1 also casts q to fp8 in extend (as decode does)."""
+    if os.environ.get("EXL3_SGL_FP8_EXTEND", "1") != "1":
+        return
+    try:
+        import inspect
+        import textwrap
+        from sglang.srt.layers.attention import xpu_backend as xb
+        cls = xb.XPUAttentionBackend
+        fn = cls.forward_extend
+        if getattr(fn, "_exl3_fp8", False):
+            return
+        src = textwrap.dedent(inspect.getsource(fn))
+        anchor = "k_descale, v_descale = None, None"
+        if anchor not in src or "super()" in src:
+            logger.warning("exl3xpu: fp8 extend patch not applied (source layout changed)")
+            return
+        line = next(l for l in src.splitlines() if l.strip() == anchor)
+        ind = line[: len(line) - len(line.lstrip())]
+        block = "\n".join(ind + l for l in _FP8_EXTEND).replace(
+            "__EXL3_FP8_Q__", str(os.environ.get("EXL3_SGL_FP8_Q", "0") == "1"))
+        new = src.replace(line, block, 1)
+        ns: dict = {}
+        exec(compile(new, "<exl3xpu:xpu_backend.forward_extend>", "exec"), xb.__dict__, ns)
+        ns["forward_extend"]._exl3_fp8 = True
+        cls.forward_extend = ns["forward_extend"]
+        # forward_decode casts q to fp8 before the kernel, which (sgl_kernel xpu 0.2.0) only accepts fp16/bf16 q
+        # ("mha_fwd only supports Half and BFloat16"); it takes a bf16 q with an fp8 cache + descale.
+        if os.environ.get("EXL3_SGL_FP8_Q", "0") != "1":
+            dsrc = textwrap.dedent(inspect.getsource(cls.forward_decode))
+            if "super()" not in dsrc:
+                dnew = dsrc
+                for pat in ("q = q.to(self.kv_cache_dtype)",
+                            "q_rope = q_rope.to(self.kv_cache_dtype) if q_rope is not None else None",
+                            "k_rope = k_rope.to(self.kv_cache_dtype) if k_rope is not None else None"):
+                    dnew = dnew.replace(pat, "pass  # exl3xpu: keep q in the model dtype")
+                if dnew != dsrc:
+                    ns = {}
+                    exec(compile(dnew, "<exl3xpu:xpu_backend.forward_decode>", "exec"), xb.__dict__, ns)
+                    cls.forward_decode = ns["forward_decode"]
+        logger.info("exl3xpu: intel_xpu forward_extend passes fp8 KV descale (q cast: %s)",
+                    os.environ.get("EXL3_SGL_FP8_Q", "0") == "1")
+    except Exception as e:  # pragma: no cover
+        logger.warning("exl3xpu: fp8 extend patch failed (%s)", e)
+
+
 def activate() -> None:
     """sglang.srt.plugins entry point."""
     global _done
@@ -519,4 +682,6 @@ def activate() -> None:
     _patch_xpu_spec_sampling()
     _patch_xpu_gdn_verify()
     _patch_xpu_mamba_scatter()
+    _patch_xpu_fp8_extend()
+    _patch_xpu_replayssm()
     logger.info("exl3xpu: registered SGLang quantization method 'exl3' (XPU)")

@@ -12,7 +12,7 @@ if [ "$want" != "$have" ]; then
   docker exec sglb70-dev bash -c "cd /w/exl3xpu && pip install --no-deps --no-build-isolation -e . >/dev/null 2>&1"
 fi
 # the server runs inside the container: killing the tmux client does not stop it
-docker exec sglb70-dev bash -c 'pkill -f "sglang.launch_server" ; for i in $(seq 60); do pgrep -f "sglang" >/dev/null || exit 0; sleep 1; done; pkill -9 -f sglang' 2>/dev/null
+docker exec sglb70-dev bash -c 'pkill -f "[s]glang.launch_server" ; for i in $(seq 90); do pgrep -f "[s]glang.launch_server" >/dev/null || exit 0; sleep 1; done; pkill -9 -f "[s]glang"' 2>/dev/null
 mkdir -p ~/sglb70/logs
 rm -f ~/sglb70/logs/$RUN.exit
 printf '%q ' "$@" > ~/sglb70/logs/$RUN.args
