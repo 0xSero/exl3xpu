@@ -4,7 +4,7 @@
 set -euo pipefail
 NAME=${1:-sglb70-dev}
 IMG=${2:-lmsysorg/sglang:v0.5.20-xpu}
-PCI=${SGLB70_PCI:-0000:c3:00.0}
+PCI=${SGLB70_PCI:-0000:84:00.0}
 R=$(basename "$(readlink -f /dev/dri/by-path/pci-$PCI-render)")
 C=$(basename "$(readlink -f /dev/dri/by-path/pci-$PCI-card)")
 BYP=$HOME/sglb70/byp

@@ -138,3 +138,55 @@ Container `sglb70-dev` (lmsysorg/sglang:v0.5.20-xpu, `sleep infinity`, maps only
 pristine venv + exl3xpu editable + onednn 2026.0.0 --no-deps); no SGLang server, no benchmark, no `sglb70-*` tmux
 session. Work dir `~/sglb70/` (exl3xpu copy, runs/, logs/, byp/). Image `lmsysorg/sglang:v0.5.20-xpu` pulled.
 Nothing else on the box was touched.
+
+## 2026-09-26: second campaign on the stable B70 (84:00.0), goal SGLang >= vLLM on every cell
+Sero approved borrowing B70 #0 (84:00.0, renderD135/card8). The live Omarchy engine
+(`...-tp1-engine`, image ghcr.io/0xsero/exl3xpu@sha256:86276b00, fp16 prefill) was `docker stop`ped at 09:31 box
+time after recording `docker inspect` to `omarchy:~/sglb70/live-engine-inspect.json` and a gateway chat check
+("17*3" -> "51"). c3:00.0 is not used under load any more; all scripts default to 84:00.0.
+
+### Paired vLLM baseline (vllm0926): image 21412bdd, same argv as the live engine, 84:00.0, today
+Recipe model.yaml (MTP k=3 pruned head, fp8 KV, 262,144 ctx, 16 seqs, chunk 4096, int8 prefill, oneDNN attention),
+prefix caching on. vLLM KV pool 310,472 tokens -> 1.18 full-context streams. Panel = `scripts/sglb70_panel.sh`:
+real corpus, t=0.7 top-p 0.95, no output cap, 15 s warm + 45 s window, one wave; prefill 2 waves (first discarded).
+| cell | think on: prose / code (agg, accept) | think off: prose / code (agg, accept) |
+|---|---|---|
+| C1 | 75.7 (3.05) / 63.4 (2.70) | 54.9 (2.29) / 83.0 (3.48) |
+| C2 | 129.9 / 122.4 | 98.9 (LOOP flag) / 147.2 |
+| C4 | 224.6 / 205.4 | - |
+| C8 | 300.2 / 303.2 | 240.0 / 370.6 |
+| C16 | 318.1 / 394.9 | 310.6 / 474.6 |
+Cold prefill: 4K 2,461, 32K 2,227, 128K 1,359 tok/s.
+
+### SGLang fixes on 84:00.0 (all paired against vllm0926, same card and day)
+1. **Acceptance "gap" was a measurement artifact.** SGLang's `generation_tokens_total / spec_verify_calls_total`
+   counters move only when a request finishes; thinking-on requests run 10-21K tokens, so a 45 s cell sees a biased
+   few. Whole-request probe (`bench/accept_probe.py`, same 4 real prompts, t=0.7, thinking on, no cap):
+   **SGLang 3.42 tokens/step** (59,468 tokens) = vLLM's 3.42 on its realistic panel. Sampling defaults are identical
+   (generation_config: t 1.0, top-k 20, top-p 0.95; requests override t=0.7/top-p 0.95). Not a lever.
+2. **Verify attention scaled with context (the real per-step gap at long outputs).** SGLang's step time grew
+   3.5 ms per 1K tokens of context (47 ms at 0, 104 ms at 16K): the 4-query verify took sgl_kernel's prefill path,
+   3.0 ms/layer at 16K fp8 keys vs 0.08 ms for a 1-query decode (`tests/bench_sgl_verify_attn.py`; 13.7 ms at 64K).
+   Fix `EXL3_SGL_VERIFY_AS_DECODE` (default on): each verify row is a decode query over the same pages with
+   cache_seqlens L-(nq-1-j) (exact bottom-right causal; no host sync, graph-captured). `tests/test_sgl_verify_as_decode.py`
+   PASS (worst rel err 7e-3 vs the stock kernel = bf16 rounding, fp8 and bf16, mixed lengths to 40K). Step time now
+   flat: 44.7 ms at 0, 46.0 at 4K (was 59.4). C1 prose thinking-on 82.6 agg (vLLM 75.7). **Kept.**
+3. **Memory: "UR_RESULT_ERROR_OUT_OF_RESOURCES" crashes at C8/C16 and on the 2nd prefill chunk.** Causes found:
+   (a) Inductor compile workers: up to 34 subprocesses each opened an XPU context (~0.18 GiB each, ~6 GiB transient)
+   -> `TORCHINDUCTOR_COMPILE_THREADS=1`; (b) SGLang's default `max_prefill_tokens` 16384 batches several prompts
+   -> `--max-prefill-tokens 4096` (vLLM's 4096 budget); (c) only ~2 GiB of the card is really free after startup
+   (scheduler holds 29.7 GiB of BOs, ~1.6 GiB outside torch), while a 4096-token chunk with a prefix takes ~2.2 GiB
+   of fragmented torch reserve -> `PYTORCH_ALLOC_CONF=expandable_segments:True`; (d) the per-draft GDN state
+   snapshots (see 4). Tools: `EXL3_MEM_TRACE`, `tests/vram_sampler.py`, `tests/mem_*.py`. Also kept: graph warm replay
+   after capture (no measurable effect), `EXL3_TORCH_MEM_FRACTION` cap (not used).
+4. **GDN ReplaySSM fold-every-commit for GDN** (`EXL3_SGL_GDN_FOLD=1` + `--enable-linear-replayssm-spec`): SGLang
+   0.5.20 implements the raw-input fold but gates it to KDA; the compact circular GDN kernel does not compile on
+   Intel Triton. Lifting the gate: per-draft snapshots 2.4 GB (8 streams) -> 0, rings 27 MB, verify via the generic
+   fused recurrent kernel, commit via `gdn_replayssm_exact_fold_kernel` (no tl.dot). **KV pool 257,536 -> 341,376 fp8
+   tokens (1.30 full-context streams; vLLM 1.18)**. Greedy texts differ from the snapshot path (fp16 state
+   materialization + BV 32 vs 16), acceptance identical (2.33 greedy thinking-off). Coherence ladder
+   1K/4K/8K/32K/**128K** OK. **Kept.**
+Current config (sg14): base args (`scripts/sglb70_base_args.txt`: 262,144 ctx, mem 0.86, intel_xpu, fp16 mamba state,
+no radix cache, 8 running, graphs 1-8, NEXTN 3/1/4, fp8 KV, bf16, metrics, max-prefill 4096)
++ `--enable-linear-replayssm-spec`; env EXL3_DRAFT_VOCAB, TORCHINDUCTOR_COMPILE_THREADS=1, EXL3_SGL_GDN_FOLD=1,
+PYTORCH_ALLOC_CONF=expandable_segments:True. Prefill (ladder, cold): 8K 1,476, 32K 1,262, 128K 756 tok/s.

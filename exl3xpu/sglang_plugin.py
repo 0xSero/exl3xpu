@@ -33,6 +33,22 @@ _PACKED = {
     "in_proj_ba": ["in_proj_b", "in_proj_a"],
 }
 TARGET_LM_HEADS: list = []
+_MEM_TRACE = int(os.environ.get("EXL3_MEM_TRACE", "0"))      # log torch XPU memory every N target lm_head calls
+_mem_n = [0, 0]
+
+
+def _mem_trace(rows: int) -> None:
+    """Host-side allocator counters only (no device sync)."""
+    _mem_n[0] += 1
+    _mem_n[1] = max(_mem_n[1], rows)
+    if _mem_n[0] % _MEM_TRACE == 0:
+        g = 2 ** 30
+        free, total = torch.xpu.mem_get_info()
+        logger.info("exl3xpu mem: alloc %.2f GiB, reserved %.2f GiB, peak alloc %.2f GiB, peak reserved %.2f GiB, "
+                    "device free %.2f of %.2f GiB, max lm_head rows %d", torch.xpu.memory_allocated() / g,
+                    torch.xpu.memory_reserved() / g, torch.xpu.max_memory_allocated() / g,
+                    torch.xpu.max_memory_reserved() / g, free / g, total / g, _mem_n[1])
+        _mem_n[1] = 0
 
 
 def _dev() -> torch.device:
@@ -293,6 +309,8 @@ def _build_classes():
             y = torch.ops.exl3xpu_C.linear(x, layer.exl3_trellis, layer.exl3_suh, layer.exl3_svh,
                                            layer.exl3_shard_of_nb, layer.exl3_bounds, layer.exl3_K, layer.exl3_cb,
                                            ops.SMALL_M_MAX, ops.RECON_SLICE_N)
+            if _MEM_TRACE and self.prefix.endswith("lm_head") and not torch.xpu.is_current_stream_capturing():
+                _mem_trace(x.shape[0])
             return y if bias is None else y + bias
 
         def embedding(self, layer, input_):
@@ -559,6 +577,205 @@ def _patch_xpu_replayssm() -> None:
     g._launch_gdn_spec = _launch_gdn_spec
 
 
+_ONEDNN_MIN_Q = int(os.environ.get("EXL3_ONEDNN_MIN_Q", "64"))
+_ONEDNN_MIN_SEQ = int(os.environ.get("EXL3_ONEDNN_MIN_SEQ", "4096"))
+
+
+def _patch_xpu_attn_routes() -> None:
+    """Two re-routes of sgl_kernel's XPU flash_attn_with_kvcache, installed on the name xpu_backend calls.
+
+    1. EXL3_SGL_VERIFY_AS_DECODE=1 (default): speculative verify / short uniform extends (<= 8 queries per sequence)
+       take the kernel's prefill path, which costs 3.0 ms per layer at 16K fp8 keys for 4 queries vs 0.08 ms for one
+       decode query (tests/bench_sgl_verify_attn.py): SGLang's step time grew 3.5 ms per 1K tokens of context. Each
+       verify row becomes its own decode query over the same pages with cache_seqlens = L - (nq - 1 - j), which is
+       exactly the bottom-right causal mask. Tensor ops only (no host sync), so it is captured into the verify graph.
+    2. EXL3_ONEDNN_ATTN=1: long single-sequence prefill chunks over the fp8 paged KV cache run through the oneDNN
+       Graph fused SDPA (exl3xpu_C::exl3_sdpa_len, fp16, one call per KV head over [0, seq_len), bottom-right causal),
+       the path the vLLM recipe uses."""
+    verify_route = os.environ.get("EXL3_SGL_VERIFY_AS_DECODE", "1") == "1"
+    onednn_route = os.environ.get("EXL3_ONEDNN_ATTN", "0") == "1"
+    if not (verify_route or onednn_route):
+        return
+    try:
+        from sglang.srt.layers.attention import xpu_backend as xb
+        from . import fp8kv_prefill as fk
+        from .ops import _get_esimd
+    except Exception as e:  # pragma: no cover
+        logger.warning("exl3xpu: XPU attention routes not installed (%s)", e)
+        return
+    orig = xb.flash_attn_with_kvcache
+    if getattr(orig, "_exl3", False):
+        return
+    state = {"E": None, "n": 0, "v": 0}
+
+    def _common_ok(kw):
+        return (kw.get("q") is not None and kw.get("k_cache") is not None and kw.get("page_table") is not None
+                and kw.get("cache_seqlens") is not None and kw.get("cu_seqlens_q") is not None
+                and kw.get("causal", False) and tuple(kw.get("window_size", (-1, -1))) == (-1, -1)
+                and not kw.get("return_softmax_lse", False) and not kw.get("softcap")
+                and kw.get("sinks") is None and kw.get("k") is None and kw.get("cache_batch_idx") is None
+                and kw.get("cache_leftpad") is None)
+
+    def flash_attn_with_kvcache(*args, **kw):
+        if args or not _common_ok(kw):
+            return orig(*args, **kw)
+        q, cs, pt = kw["q"], kw["cache_seqlens"], kw["page_table"]
+        nq = kw.get("max_seqlen_q")
+        bs = cs.shape[0]
+        if (verify_route and isinstance(nq, int) and 1 < nq <= 8 and q.shape[0] == bs * nq
+                and pt.shape[0] == bs):
+            dev = q.device
+            j = torch.arange(nq, device=dev, dtype=cs.dtype).repeat(bs)
+            kw2 = dict(kw)
+            kw2["cache_seqlens"] = cs.repeat_interleave(nq) - (nq - 1 - j)
+            kw2["page_table"] = pt.repeat_interleave(nq, dim=0)
+            kw2["cu_seqlens_q"] = torch.arange(bs * nq + 1, device=dev, dtype=kw["cu_seqlens_q"].dtype)
+            kw2["max_seqlen_q"] = 1
+            for d in ("k_descale", "v_descale"):
+                if kw.get(d) is not None:
+                    kw2[d] = kw[d].reshape(-1)[:1].reshape(()).expand(bs * nq, kw[d].shape[-1])
+            if state["v"] == 0:
+                logger.info("exl3xpu: %d-query verify attention served as %d decode queries", nq, bs * nq)
+            state["v"] += 1
+            return orig(**kw2)
+        kc = kw["k_cache"]
+        if not (onednn_route and kc.dtype == torch.float8_e4m3fn and kw["cu_seqlens_q"].numel() == 2
+                and q.shape[0] >= _ONEDNN_MIN_Q and "out" not in kw and not torch.xpu.is_current_stream_capturing()):
+            return orig(**kw)
+        if state["E"] is None:
+            E = _get_esimd()
+            state["E"] = E if (E and hasattr(E, "exl3_sdpa_len")) else False
+        if not state["E"]:
+            return orig(**kw)
+        seq_len = int(cs[0].item())
+        if seq_len < _ONEDNN_MIN_SEQ:
+            return orig(**kw)
+        kd, vd = kw.get("k_descale"), kw.get("v_descale")
+        ks = float(kd.reshape(-1)[0].item()) if kd is not None else 1.0
+        vs = float(vd.reshape(-1)[0].item()) if vd is not None else 1.0
+        out = torch.empty(q.shape, dtype=torch.float16, device=q.device)
+        fk.prefill_attention_onednn(state["E"], q.to(torch.float16), kc, kw["v_cache"], pt[0], seq_len, ks, vs,
+                                    float(kw["softmax_scale"]), out)
+        if state["n"] == 0:
+            logger.info("exl3xpu: oneDNN fused SDPA serving a %d-query prefill chunk at %d keys", q.shape[0], seq_len)
+        state["n"] += 1
+        return out.to(q.dtype)
+
+    flash_attn_with_kvcache._exl3 = True
+    xb.flash_attn_with_kvcache = flash_attn_with_kvcache
+    logger.info("exl3xpu: XPU attention routes: verify-as-decode=%s oneDNN-prefill=%s", verify_route, onednn_route)
+
+
+def _patch_gdn_replayssm_fold() -> None:
+    """EXL3_SGL_GDN_FOLD=1 (with --enable-linear-replayssm-spec): use SGLang's raw-input "fold-every-commit" ReplaySSM
+    protocol for GDN (SGLang 0.5.20 gates it to KDA and uses the compact circular kernel for GDN, which Intel Triton
+    cannot compile). Verify ring-writes the raw k/v/g/beta of the draft window (generic fused recurrent kernel, same
+    one the snapshot path uses), the commit folds the accepted prefix into the state. Drops the per-draft full-state
+    snapshots: 4.8 GB at 16 streams on Qwen3.8-27B."""
+    if os.environ.get("EXL3_SGL_GDN_FOLD", "0") != "1":
+        return
+    try:
+        import inspect
+        import textwrap
+        from sglang.srt.mem_cache import memory_pool as m
+        cls = m.MambaPool
+        if getattr(cls.__init__, "_exl3", False):
+            return
+        src = textwrap.dedent(inspect.getsource(cls.__init__))
+        new, n1 = re.subn(r"enable_linear_replayssm_spec and cache_params\.is_kda(\s*\n\s*\))",
+                          r"enable_linear_replayssm_spec\1", src, count=1)
+        new, n2 = re.subn(r"if enable_linear_replayssm_spec and cache_params\.is_kda:",
+                          "if enable_linear_replayssm_spec and (cache_params.is_kda or self.replayssm_spec_fold):",
+                          new, count=1)
+        if (n1, n2) != (1, 1):
+            logger.warning("exl3xpu: GDN fold patch not applied (MambaPool layout changed: %d %d)", n1, n2)
+            return
+        ns: dict = {}
+        exec(compile(new, "<exl3xpu:MambaPool.__init__>", "exec"), m.__dict__, ns)
+        ns["__init__"]._exl3 = True
+        cls.__init__ = ns["__init__"]
+        logger.info("exl3xpu: GDN ReplaySSM fold-every-commit enabled (no per-draft state snapshots)")
+    except Exception as e:  # pragma: no cover
+        logger.warning("exl3xpu: GDN fold patch failed (%s)", e)
+
+
+def _patch_xpu_graph_warm_replay() -> None:
+    """Replay every captured XPU graph once right after capture (EXL3_SGL_GRAPH_WARM_REPLAY=1, default). A SYCL graph
+    allocates device memory lazily on its first replay; at serve time that first replay comes when concurrency first
+    reaches a new batch size, after the torch cache has taken the headroom -> UR_RESULT_ERROR_OUT_OF_DEVICE_MEMORY in
+    graph replay. Replaying at startup makes the cost deterministic and visible in the post-capture free memory.
+    Capture already runs the forward twice eagerly with the same dummy inputs, so the extra replay is equivalent."""
+    if os.environ.get("EXL3_SGL_GRAPH_WARM_REPLAY", "1") != "1":
+        return
+    try:
+        from sglang.srt.hardware_backend.xpu.graph_runner import xpu_full_graph_backend as gb
+    except Exception as e:  # pragma: no cover
+        logger.warning("exl3xpu: graph warm replay not installed (%s)", e)
+        return
+    cls = gb.FullXPUGraphBackend
+    orig = cls.capture_one
+    if getattr(orig, "_exl3", False):
+        return
+
+    def capture_one(self, shape_key, forward_fn, capture_inputs=None, post_warmup_hook=None):
+        r = orig(self, shape_key, forward_fn, capture_inputs, post_warmup_hook)
+        g = self._graphs.get(shape_key)
+        if g is not None:
+            self._device_module.synchronize()
+            g.replay()
+            self._device_module.synchronize()
+        return r
+
+    capture_one._exl3 = True
+    cls.capture_one = capture_one
+
+
+def install_mem_probe(model: torch.nn.Module, calls: int = 3, thresh_mb: int = 64) -> None:
+    """Debug (EXL3_MEM_PROBE=1): log modules whose forward grows device memory held outside the torch allocator."""
+    g = 2 ** 20
+    state = {"n": 0}
+
+    def nontorch():
+        torch.xpu.synchronize()
+        f, t = torch.xpu.mem_get_info()
+        return (t - f - torch.xpu.memory_reserved()) / g
+
+    def pre(mod, args):
+        if state["n"] < calls * 1000:
+            mod._exl3_nt = nontorch()
+
+    def post(mod, args, out):
+        if state["n"] < calls * 1000 and hasattr(mod, "_exl3_nt"):
+            d = nontorch() - mod._exl3_nt
+            state["n"] += 1
+            if d > thresh_mb:
+                logger.info("exl3xpu mem probe: %s (%s) +%.0f MiB outside torch", mod._exl3_name,
+                            type(mod).__name__, d)
+
+    for name, mod in model.named_modules():
+        mod._exl3_name = name
+        mod.register_forward_pre_hook(pre)
+        mod.register_forward_hook(post)
+    logger.info("exl3xpu mem probe installed on %d modules", sum(1 for _ in model.named_modules()))
+
+
+def _patch_mem_probe() -> None:
+    if os.environ.get("EXL3_MEM_PROBE", "0") != "1":
+        return
+    from sglang.srt.model_executor import model_runner as mr
+    orig = mr.ModelRunner.load_model
+
+    def load_model(self, *a, **k):
+        r = orig(self, *a, **k)
+        try:
+            install_mem_probe(self.model)
+        except Exception as e:  # pragma: no cover
+            logger.warning("exl3xpu: mem probe failed (%s)", e)
+        return r
+
+    mr.ModelRunner.load_model = load_model
+
+
 def _allow_xpu_in(module, names: list[str]) -> list[str]:
     """Re-define `module.<name>` from its source with every `<t>.is_cuda` test accepting XPU tensors as well
     (SGLang guards some device-agnostic Triton launchers with CUDA-only checks)."""
@@ -684,4 +901,17 @@ def activate() -> None:
     _patch_xpu_mamba_scatter()
     _patch_xpu_fp8_extend()
     _patch_xpu_replayssm()
+    _patch_xpu_attn_routes()
+    _patch_gdn_replayssm_fold()
+    _patch_xpu_graph_warm_replay()
+    _patch_mem_probe()
+    frac = os.environ.get("EXL3_TORCH_MEM_FRACTION")
+    if frac:
+        # cap the torch caching allocator so the Level Zero driver keeps room for its own allocations (kernel scratch
+        # for spilling kernels on first launch, command lists): SGLang's static fraction does not bound the cache
+        try:
+            torch.xpu.set_per_process_memory_fraction(float(frac))
+            logger.info("exl3xpu: torch XPU allocator capped at %.3f of the card", float(frac))
+        except Exception as e:  # pragma: no cover
+            logger.warning("exl3xpu: could not cap the torch allocator (%s)", e)
     logger.info("exl3xpu: registered SGLang quantization method 'exl3' (XPU)")

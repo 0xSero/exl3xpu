@@ -4,7 +4,7 @@
 RUN=$1; shift
 tmux kill-session -t sglb70-srv 2>/dev/null
 # the card re-enumerates (new renderD/card numbers) after every PCIe link drop: recreate the container if stale
-want=$(basename "$(readlink -f /dev/dri/by-path/pci-${SGLB70_PCI:-0000:c3:00.0}-render)")
+want=$(basename "$(readlink -f /dev/dri/by-path/pci-${SGLB70_PCI:-0000:84:00.0}-render)")
 have=$(docker exec sglb70-dev ls /dev/dri 2>/dev/null | grep renderD)
 if [ "$want" != "$have" ]; then
   echo "card node changed ($have -> $want): recreating sglb70-dev"

@@ -276,11 +276,19 @@ async def spec_counters(base):
     except Exception:
         return None
     acc = drafts = None
+    sg_gen = sg_ver = 0.0
     for line in txt.splitlines():
         if line.startswith("vllm:spec_decode_num_accepted_tokens_total"):
             acc = float(line.split()[-1])
         elif line.startswith("vllm:spec_decode_num_drafts_total"):
             drafts = float(line.split()[-1])
+        elif line.startswith("sglang:generation_tokens_total"):
+            sg_gen += float(line.split()[-1])
+        elif line.startswith("sglang:spec_verify_calls_total"):
+            sg_ver += float(line.split()[-1])
+    if acc is None and sg_ver > 0:
+        # SGLang (--enable-metrics): tokens per verify step = 1 + accepted/drafts; counted when requests finish
+        return (sg_gen - sg_ver, sg_ver)
     return (acc, drafts) if acc is not None and drafts is not None else None
 
 
