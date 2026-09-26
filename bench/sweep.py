@@ -4,7 +4,7 @@ Saturation sweep for an OpenAI-compatible server (inference-tuning-protocol pane
   decode : closed-loop C workers, each streaming unique cold prompts back to back for WARM+WINDOW s.
            aggregate decode = output tokens whose arrival falls inside the steady window / window.
            per-stream decode = (n_chunks-1)/(t_last - t_first) per request (median over requests).
-  prefill: C concurrent unique cold prompts of L tokens, max_tokens=1 (streamed, TTFT);
+  prefill: C concurrent unique cold prompts of L tokens, stream closed after the first token (TTFT);
            aggregate prefill = total prompt tokens / wall time of the wave; single-stream = L / TTFT.
 
 GPU busy% sampled from xe sysfs gtidle residency during every cell (flag GPU_IDLE < 60%).
@@ -151,7 +151,8 @@ class GpuSampler:
                 vid = open(os.path.join(dev, "device")).read().strip()
             except Exception:
                 vid = ""
-            if vid.lower() == "0xe223":
+            want = os.environ.get("EXL3_GPU_CARDS")   # e.g. "card5": sample only these cards
+            if vid.lower() == "0xe223" and (not want or p.split("/")[4] in want.split(",")):
                 self.devs.append(p)
 
     def read(self):
@@ -191,14 +192,22 @@ def _auth_headers() -> dict:
         return {"Authorization": "Bearer " + fh.read().strip()}
 
 
-async def stream_one(session, url, model, prompt, max_tokens, temperature, thinking, rec):
+def chat_prompt_tokens(prompt: str, thinking: bool) -> int:
+    count_tokens("x")
+    return len(_TOK.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True,
+                                        tokenize=True, enable_thinking=thinking))
+
+
+async def stream_one(session, url, model, prompt, max_tokens, temperature, thinking, rec, first_only=False):
     # times[i] is a token arrival: a chunk carrying n tokens (speculative decoding emits several per chunk)
     # appends its timestamp n times. n comes from vLLM's cumulative per-chunk usage when available,
     # otherwise from tokenizing the delta text.
-    body = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens,
+    body = {"model": model, "messages": [{"role": "user", "content": prompt}],
             "temperature": temperature, "stream": True,
             "stream_options": {"include_usage": True, "continuous_usage_stats": True},
             "chat_template_kwargs": {"enable_thinking": thinking}}
+    if max_tokens:           # 0 = no cap: the request ends at EOS (or when the cell cancels it)
+        body["max_tokens"] = max_tokens
     if temperature > 0:
         body["top_p"] = 0.95
     t_send = time.time()
@@ -235,6 +244,8 @@ async def stream_one(session, url, model, prompt, max_tokens, temperature, think
                         rec["times"].extend([now] * max(1, n))
                     if ch.get("finish_reason"):
                         rec["finish"] = ch["finish_reason"]
+                if first_only and rec["times"]:
+                    break            # TTFT probe: close the stream (the server aborts the request); no output cap sent
         rec["ok"] = True
     except Exception as e:  # noqa
         rec["error"] = repr(e)[:200]
@@ -364,8 +375,11 @@ async def prefill_cell(args, C, ctx):
         g_a = sampler.read()
         t0 = time.time()
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3600)) as s:
-            await asyncio.gather(*[stream_one(s, url, args.model, pr, 1, 0.0, False, r)
+            await asyncio.gather(*[stream_one(s, url, args.model, pr, 0, 0.0, False, r, first_only=True)
                                    for pr, r in zip(prompts, recs)])
+        for pr, r in zip(prompts, recs):
+            if not r.get("prompt_tokens"):
+                r["prompt_tokens"] = chat_prompt_tokens(pr, False)
         wall = max(r.get("times", [r["t_end"]])[0] if r.get("times") else r["t_end"] for r in recs) - t0
         g_b = sampler.read()
         ptoks = sum(r.get("prompt_tokens") or 0 for r in recs)

@@ -12,6 +12,9 @@ license = {text = "MIT"}
 [project.entry-points."vllm.general_plugins"]
 exl3xpu = "exl3xpu.vllm_plugin:register"
 
+[project.entry-points."sglang.srt.plugins"]
+exl3xpu = "exl3xpu.sglang_plugin:activate"
+
 [tool.setuptools]
 packages = ["exl3xpu"]
 

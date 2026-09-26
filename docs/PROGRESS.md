@@ -535,3 +535,11 @@ openssl-selfsigned-cert, pypi-server), 1 failed (torch-tensor-parallelism); qemu
 (tmux did not start); the rest are connection errors / cancellations from the drop (not model results).
 At C8: 7 requests running, KV 77%, ~250 tok/s aggregate, no preemptions.
 GPQA Diamond not run: the dataset is gated and neither the omarchy nor the Mac HF token has access.
+- TB 2.1 on B70 #0 (run qwen38-b70-20260925T214804Z, C8, 2 attempts), 21:48 -> 02:01: 9 trials finished before
+  the failure; **8/8 verifier-scored trials passed** (kv-store-grpc, log-summary-date-ranges,
+  model-extraction-relu-logits, mteb-leaderboard, openssl-selfsigned-cert, pypi-server, regex-log,
+  torch-tensor-parallelism); qemu-alpine-ssh failed in the harness (tmux). At C8 the KV pool was full
+  (91-96%, 730 preemptions, prefix-cache hits 26% of prompt tokens) but every request finished (0 errors).
+  At 01:57 B70 #1 (slot 19, idle) and at ~02:01 B70 #0 (slot 17, port 80:03.1) both lost their PCIe link; the
+  eval engine segfaulted, the remaining trials are connection errors (not model results). B70 #0 came back as
+  renderD135; the user's live engine was recreated from its saved config on renderD135.
