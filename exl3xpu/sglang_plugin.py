@@ -776,6 +776,32 @@ def _patch_mem_probe() -> None:
     mr.ModelRunner.load_model = load_model
 
 
+def _patch_xpu_mamba_extra_buffer() -> None:
+    """Prefix caching for GDN hybrids on XPU (EXL3_SGL_XPU_EXTRA_BUFFER=1, default). SGLang 0.5.20 refuses the mamba
+    radix `extra_buffer` strategy on XPU outright (`supports_mamba_cache_extra_buffer`: `if is_xpu: return False`),
+    and the alternative `no_buffer` needs page size 1, which the intel_xpu attention backend forbids (64/128) -> no
+    prefix cache at all. extra_buffer only needs the FLA/Triton GDN kernels, which run on XPU; lift the platform gate
+    (same arch/backend rule as CUDA)."""
+    if os.environ.get("EXL3_SGL_XPU_EXTRA_BUFFER", "1") != "1":
+        return
+    try:
+        from sglang.srt.arg_groups import overrides as ov
+        from sglang.srt.arg_groups import mamba_hook as mh
+    except Exception as e:  # pragma: no cover
+        logger.warning("exl3xpu: extra_buffer gate patch not installed (%s)", e)
+        return
+    archs = ov._MAMBA_EXTRA_BUFFER_ARCHS
+
+    def supports_mamba_cache_extra_buffer(view, model_arch):
+        if model_arch in archs:
+            return view.linear_attn_backend == "triton"
+        return False
+
+    ov.supports_mamba_cache_extra_buffer = supports_mamba_cache_extra_buffer
+    mh.supports_mamba_cache_extra_buffer = supports_mamba_cache_extra_buffer
+    logger.info("exl3xpu: mamba radix extra_buffer allowed on XPU (prefix caching for GDN hybrids)")
+
+
 def _allow_xpu_in(module, names: list[str]) -> list[str]:
     """Re-define `module.<name>` from its source with every `<t>.is_cuda` test accepting XPU tensors as well
     (SGLang guards some device-agnostic Triton launchers with CUDA-only checks)."""
@@ -905,6 +931,7 @@ def activate() -> None:
     _patch_gdn_replayssm_fold()
     _patch_xpu_graph_warm_replay()
     _patch_mem_probe()
+    _patch_xpu_mamba_extra_buffer()
     frac = os.environ.get("EXL3_TORCH_MEM_FRACTION")
     if frac:
         # cap the torch caching allocator so the Level Zero driver keeps room for its own allocations (kernel scratch

@@ -237,3 +237,23 @@ deployment config keeps agent claude, folder ~/Work/la-typed-test. The original 
 - Known SGLang gap for replay: prefix caching is OFF on the current config. `intel_xpu` attention needs page 64/128;
   `no_buffer` mamba radix needs page 1; `extra_buffer` is refused on XPU by `supports_mamba_cache_extra_buffer`
   (hard-coded False for XPU). First step on a stable card: lift that gate (as done for the fold) and validate.
+
+## 2026-09-26 afternoon: "push" round on 84:00.0 (live engine stopped via `omarchy-local-ai stop` at ~13:40 box time)
+- Power/clock lever: none without root. `tile0/gt0/freq0/max_freq`, `min_freq`, `power_profile` and hwmon
+  `power1_cap` are root-owned (mode 644 / 664 root:root), no xpu-smi, and container sysfs is read-only; a privileged
+  container would be root in all but name, so it was not used. Stock values recorded: max 2800 MHz, cap 230 W,
+  profile base (both B70s). Drops cannot be A/B'd against power here: owner action needed.
+- Resilience: `scripts/sglb70_supervise.py` (plan of cells, checkpoint per cell in ~/sglb70/ckpt, waits for the card
+  to re-enumerate, relaunches the server on the new render node, retries the cell up to 3x, logs `kind=drop` rows to
+  ~/sglb70/ledger.jsonl, aborts if any slot other than 17 goes link-down). Named configs in `scripts/cfg/*.args|env`.
+
+### Prefix caching on XPU for the GDN hybrid: WORKS (`_patch_xpu_mamba_extra_buffer`, default on)
+SGLang 0.5.20 hard-codes `supports_mamba_cache_extra_buffer() -> False` on XPU; `no_buffer` needs page 1, which
+intel_xpu attention forbids. Lifting the platform gate (same arch + triton-GDN rule as CUDA) boots a Unified Radix
+Cache (FULL + MAMBA components, page 128) with `--mamba-radix-cache-strategy extra_buffer`. `bench/pc_check.py`
+(3 chained turns over one document, a different needle per turn, greedy, `--enable-cache-report`):
+| doc | turn 1 TTFT (cold) | turn 2 / 3 TTFT | cached tokens | needles |
+|---|---|---|---|---|
+| 16.5K (2 seeds) | 7.2-8.8 s | 0.18-0.25 s | 16,512 | 6/6 |
+| 65.8K | 36.0 s | 0.60 / 0.45 s | 65,664 / 65,792 | 3/3 |
+Greedy identity: all 6 answers (2 seeds x 3 turns) byte-identical to the no-cache config (`nopc`). **Kept (cfg pc0).**
