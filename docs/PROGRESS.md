@@ -543,3 +543,9 @@ GPQA Diamond not run: the dataset is gated and neither the omarchy nor the Mac H
   At 01:57 B70 #1 (slot 19, idle) and at ~02:01 B70 #0 (slot 17, port 80:03.1) both lost their PCIe link; the
   eval engine segfaulted, the remaining trials are connection errors (not model results). B70 #0 came back as
   renderD135; the user's live engine was recreated from its saved config on renderD135.
+- 2026-09-26: B70 #0 (slot 17) also flaps now: Link Down 12:01 (under the user's live engine) and 12:36 (eval
+  server boot, segfault 139). B70 #1 dropped again 02:45 (idle). Corrected AER errors ~17.5K lines/hour, mostly
+  from c0:03.1 (the c5:00 device on the same root complex as B70 #1). ASPM L1 is already 0 on both B70 paths;
+  no root on the host, so nothing more is fixable in software. TB 2.1 resume (C6, failed trials filtered) aborted
+  before any new trial ran; the job keeps its 8 scored trials (8/8 passed) and is resumable with
+  `harbor jobs resume -p <job> -f InternalServerError -f CancelledError -f RuntimeError`.
