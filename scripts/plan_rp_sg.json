@@ -1,0 +1,30 @@
+{
+ "name": "rp-sg-pc0",
+ "engine": "sglang",
+ "run": "rp-sg",
+ "port": 8210,
+ "launch": "bash ~/sglb70/exl3xpu/scripts/sglb70_cfg.sh pc0 rp-sg",
+ "kill": "docker exec sglb70-dev pkill -f '[s]glang.launch_server'; true",
+ "cells": [
+  {
+   "id": "replay-c1",
+   "timeout": 5400,
+   "cmd": "docker exec sglb70-dev python3 /w/replay/replay_bench.py --url http://127.0.0.1:8210 --exp rp-sg-pc0 --engine sglang --cells 1 --replay /w/replay/omp_replay_corpus.redacted.filtered.jsonl --ledger /w/ledger.jsonl --runs /w/replay/runs --card $(basename $(readlink -f /dev/dri/by-path/pci-0000:84:00.0-card)) --sgl-log /w/runs/rp-sg/server.log --note 'paired 84:00.0 2026-09-26'"
+  },
+  {
+   "id": "replay-c2",
+   "timeout": 5400,
+   "cmd": "docker exec sglb70-dev python3 /w/replay/replay_bench.py --url http://127.0.0.1:8210 --exp rp-sg-pc0 --engine sglang --cells 2 --replay /w/replay/omp_replay_corpus.redacted.filtered.jsonl --ledger /w/ledger.jsonl --runs /w/replay/runs --card $(basename $(readlink -f /dev/dri/by-path/pci-0000:84:00.0-card)) --sgl-log /w/runs/rp-sg/server.log --note 'paired 84:00.0 2026-09-26'"
+  },
+  {
+   "id": "replay-c4",
+   "timeout": 5400,
+   "cmd": "docker exec sglb70-dev python3 /w/replay/replay_bench.py --url http://127.0.0.1:8210 --exp rp-sg-pc0 --engine sglang --cells 4 --replay /w/replay/omp_replay_corpus.redacted.filtered.jsonl --ledger /w/ledger.jsonl --runs /w/replay/runs --card $(basename $(readlink -f /dev/dri/by-path/pci-0000:84:00.0-card)) --sgl-log /w/runs/rp-sg/server.log --note 'paired 84:00.0 2026-09-26'"
+  },
+  {
+   "id": "replay-c8",
+   "timeout": 5400,
+   "cmd": "docker exec sglb70-dev python3 /w/replay/replay_bench.py --url http://127.0.0.1:8210 --exp rp-sg-pc0 --engine sglang --cells 8 --replay /w/replay/omp_replay_corpus.redacted.filtered.jsonl --ledger /w/ledger.jsonl --runs /w/replay/runs --card $(basename $(readlink -f /dev/dri/by-path/pci-0000:84:00.0-card)) --sgl-log /w/runs/rp-sg/server.log --note 'paired 84:00.0 2026-09-26'"
+  }
+ ]
+}

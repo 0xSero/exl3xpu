@@ -448,19 +448,28 @@ class _DraftHead(torch.nn.Module):
                 setattr(self, a, getattr(target, a))
 
 
+_TOPK_FAST = int(os.environ.get("EXL3_SGL_SAMPLE_TOPK", "256"))   # 0 disables the top-k fast path
+
+
 def _sample_rows(logits: torch.Tensor, temps: torch.Tensor, top_ks: torch.Tensor | None,
                  top_ps: torch.Tensor | None) -> torch.Tensor:
-    """One token per row from softmax(logits / T) restricted to top-k and top-p (torch only, any device)."""
-    probs = torch.softmax(logits.float() / temps.float().view(-1, 1), dim=-1)
-    sp, si = probs.sort(dim=-1, descending=True)
-    keep = torch.ones_like(sp, dtype=torch.bool)
+    """One token per row from softmax(logits / T) with SGLang's semantics: top-k renormalize, then top-p on the
+    renormalized probabilities (top_k_renorm_prob -> top_p_renorm_prob). When every row's top-k is <= _TOPK_FAST
+    (generation-config default top_k=20) only the top _TOPK_FAST logits are sorted: 0.3 vs 5.5 ms for 32 rows of the
+    248K vocab. Otherwise the whole row is sorted."""
+    x = logits.float() / temps.float().view(-1, 1)
+    if top_ks is not None and _TOPK_FAST > 0 and bool((top_ks <= _TOPK_FAST).all()):
+        sv, si = torch.topk(x, _TOPK_FAST, dim=-1)                   # sorted descending
+    else:
+        sv, si = x.sort(dim=-1, descending=True)
+    ranks = torch.arange(sv.shape[1], device=sv.device).view(1, -1)
     if top_ks is not None:
-        ranks = torch.arange(sp.shape[1], device=sp.device).view(1, -1)
-        keep &= ranks < top_ks.view(-1, 1).clamp_min(1)
+        sv = sv.masked_fill(ranks >= top_ks.view(-1, 1).clamp_min(1), float("-inf"))
+    sp = torch.softmax(sv, dim=-1)                                   # renormalized over the kept top-k
     if top_ps is not None:
-        keep &= (sp.cumsum(-1) - sp) < top_ps.float().view(-1, 1)
-    keep[:, 0] = True
-    sp = sp * keep
+        keep = (sp.cumsum(-1) - sp) < top_ps.float().view(-1, 1)
+        keep[:, 0] = True
+        sp = sp * keep
     pick = torch.multinomial(sp / sp.sum(-1, keepdim=True), 1)
     return si.gather(1, pick)
 
@@ -776,6 +785,60 @@ def _patch_mem_probe() -> None:
     mr.ModelRunner.load_model = load_model
 
 
+def _patch_step_timing() -> None:
+    """Debug (EXL3_STEP_TIMING=N): synchronized wall time of every XPU graph replay (by runner class and batch shape)
+    and of each speculative decode step (EAGLEWorkerV2.forward_batch_generation, decode batches only); logs means
+    every N steps. Adds syncs, so absolute step time rises slightly; the split is what matters."""
+    n_every = int(os.environ.get("EXL3_STEP_TIMING", "0"))
+    if not n_every:
+        return
+    import collections
+    import time as _t
+    from sglang.srt.hardware_backend.xpu.graph_runner import xpu_full_graph_backend as gb
+    from sglang.srt.speculative import eagle_worker_v2 as ew
+    acc = collections.defaultdict(lambda: [0, 0.0])
+    step = {"n": 0}
+    ctx = {"runner": ""}
+    orig_replay = gb.FullXPUGraphBackend.replay
+
+    def replay(self, shape_key, static_forward_batch, **kw):
+        torch.xpu.synchronize(); t = _t.perf_counter()
+        r = orig_replay(self, shape_key, static_forward_batch, **kw)
+        torch.xpu.synchronize()
+        k = f"graph:{getattr(self, '_exl3_owner', '?')}:{shape_key}"
+        acc[k][0] += 1; acc[k][1] += _t.perf_counter() - t
+        return r
+
+    orig_init = gb.FullXPUGraphBackend.__init__
+
+    def init(self, runner, *a, **k):
+        orig_init(self, runner, *a, **k)
+        self._exl3_owner = type(runner).__name__
+
+    orig_fbg = ew.EAGLEWorkerV2.forward_batch_generation
+
+    def forward_batch_generation(self, batch, *a, **k):
+        is_dec = hasattr(batch, "forward_mode") and not batch.forward_mode.is_extend()
+        torch.xpu.synchronize(); t = _t.perf_counter()
+        r = orig_fbg(self, batch, *a, **k)
+        torch.xpu.synchronize()
+        if is_dec:
+            bs = getattr(batch, "batch_size", None)
+            bs = bs() if callable(bs) else bs
+            key = f"step:bs{bs}"
+            acc[key][0] += 1; acc[key][1] += _t.perf_counter() - t
+            step["n"] += 1
+            if step["n"] % n_every == 0:
+                logger.info("exl3xpu step timing: " + "; ".join(
+                    f"{k} n={c} {1000 * s / c:.2f} ms" for k, (c, s) in sorted(acc.items())))
+                acc.clear()
+        return r
+
+    gb.FullXPUGraphBackend.replay = replay
+    gb.FullXPUGraphBackend.__init__ = init
+    ew.EAGLEWorkerV2.forward_batch_generation = forward_batch_generation
+
+
 def _patch_xpu_mamba_extra_buffer() -> None:
     """Prefix caching for GDN hybrids on XPU (EXL3_SGL_XPU_EXTRA_BUFFER=1, default). SGLang 0.5.20 refuses the mamba
     radix `extra_buffer` strategy on XPU outright (`supports_mamba_cache_extra_buffer`: `if is_xpu: return False`),
@@ -932,6 +995,7 @@ def activate() -> None:
     _patch_xpu_graph_warm_replay()
     _patch_mem_probe()
     _patch_xpu_mamba_extra_buffer()
+    _patch_step_timing()
     frac = os.environ.get("EXL3_TORCH_MEM_FRACTION")
     if frac:
         # cap the torch caching allocator so the Level Zero driver keeps room for its own allocations (kernel scratch

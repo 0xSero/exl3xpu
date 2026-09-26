@@ -1,0 +1,30 @@
+{
+ "name": "rp-vllm",
+ "engine": "vllm",
+ "run": "rp-vllm",
+ "port": 8110,
+ "launch": "docker rm -f sglb70-vllm >/dev/null 2>&1; VEXTRA='--enable-prompt-tokens-details' bash ~/sglb70/exl3xpu/scripts/sglb70_vllm.sh && for i in $(seq 200); do curl -sf -m 5 http://127.0.0.1:8110/v1/models >/dev/null && exit 0; docker ps --format '{{.Names}}' | grep -q sglb70-vllm || exit 1; sleep 5; done; exit 1",
+ "kill": "docker stop -t 20 sglb70-vllm; true",
+ "cells": [
+  {
+   "id": "replay-c1",
+   "timeout": 5400,
+   "cmd": "docker exec sglb70-dev python3 /w/replay/replay_bench.py --url http://127.0.0.1:8110 --exp rp-vllm --engine vllm --cells 1 --replay /w/replay/omp_replay_corpus.redacted.filtered.jsonl --ledger /w/ledger.jsonl --runs /w/replay/runs --card $(basename $(readlink -f /dev/dri/by-path/pci-0000:84:00.0-card))  --note 'paired 84:00.0 2026-09-26'"
+  },
+  {
+   "id": "replay-c2",
+   "timeout": 5400,
+   "cmd": "docker exec sglb70-dev python3 /w/replay/replay_bench.py --url http://127.0.0.1:8110 --exp rp-vllm --engine vllm --cells 2 --replay /w/replay/omp_replay_corpus.redacted.filtered.jsonl --ledger /w/ledger.jsonl --runs /w/replay/runs --card $(basename $(readlink -f /dev/dri/by-path/pci-0000:84:00.0-card))  --note 'paired 84:00.0 2026-09-26'"
+  },
+  {
+   "id": "replay-c4",
+   "timeout": 5400,
+   "cmd": "docker exec sglb70-dev python3 /w/replay/replay_bench.py --url http://127.0.0.1:8110 --exp rp-vllm --engine vllm --cells 4 --replay /w/replay/omp_replay_corpus.redacted.filtered.jsonl --ledger /w/ledger.jsonl --runs /w/replay/runs --card $(basename $(readlink -f /dev/dri/by-path/pci-0000:84:00.0-card))  --note 'paired 84:00.0 2026-09-26'"
+  },
+  {
+   "id": "replay-c8",
+   "timeout": 5400,
+   "cmd": "docker exec sglb70-dev python3 /w/replay/replay_bench.py --url http://127.0.0.1:8110 --exp rp-vllm --engine vllm --cells 8 --replay /w/replay/omp_replay_corpus.redacted.filtered.jsonl --ledger /w/ledger.jsonl --runs /w/replay/runs --card $(basename $(readlink -f /dev/dri/by-path/pci-0000:84:00.0-card))  --note 'paired 84:00.0 2026-09-26'"
+  }
+ ]
+}

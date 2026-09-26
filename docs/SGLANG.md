@@ -257,3 +257,16 @@ Cache (FULL + MAMBA components, page 128) with `--mamba-radix-cache-strategy ext
 | 16.5K (2 seeds) | 7.2-8.8 s | 0.18-0.25 s | 16,512 | 6/6 |
 | 65.8K | 36.0 s | 0.60 / 0.45 s | 65,664 / 65,792 | 3/3 |
 Greedy identity: all 6 answers (2 seeds x 3 turns) byte-identical to the no-cache config (`nopc`). **Kept (cfg pc0).**
+
+### C>=2 scaling: where the step goes
+- Full-vocab sort in the XPU spec-sampling patch: 0.17 ms per verify row (5.45 ms per step at C8 = 32 rows,
+  `tests/bench_spec_sample.py`). New sampler: `torch.topk(256)` when every row's top-k <= 256 (generation-config
+  top_k=20), SGLang's exact semantics (top-k renormalize, then top-p on the renormalized probs); distribution check
+  vs the full sort: total variation 0.024 over 4,000 draws (sampling noise ~0.03); 8 rows 1.42 -> 0.67 ms. **Kept.**
+- XPU graph kernels do not appear in torch-profiler traces (replayed SYCL graphs), and `profile_stages=["decode"]`
+  never fires for MTP (verify is TARGET_VERIFY), so the step was split with synchronized timers instead
+  (`EXL3_STEP_TIMING`, debug): C2 step 49.6 ms = verify graph 40.0 + draft decode 2.6 + draft extend 1.3 + 5.7 eager/host;
+  C4 59.5 = 48.1 + 2.5 + 1.4 + 7.5; C8 (7 running) 74.2 = 63.2 + 2.7 + 1.6 + 6.7. The verify graph is the EXL3
+  linears at M = 4 x streams (same kernels as vLLM) + GDN + attention; vLLM's whole C8 thinking-off step is ~72 ms at
+  the same acceptance (2.28), so after the sampler fix the per-step gap at C8 is ~3 %. The remaining aggregate gap is
+  new-request prefill interrupting decode (C8 TTFT p50 1.5 s vs vLLM 0.7 s), which the replay measures directly.
